@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using HarmonyLib;
 using Manager;
 using Newtonsoft.Json;
 using SolarExpanse.Multiplayer.Networking.Client;
@@ -15,18 +14,17 @@ using GameObjectInfo = global::Game.Info.ObjectInfo;
 using ObjectInfoDataType = global::Game.ObjectInfoDataScripts.ObjectInfoData;
 using FacilityType = global::Game.ObjectInfoDataScripts.Facility;
 using RowResourcesDataType = global::Game.UI.Windows.Elements.ObjectInfoElements.RowResourcesData;
-using MoneyControllerType = global::Game.CompanyScripts.MoneyController;
 
 namespace SolarExpanse.Multiplayer.Game.Company;
 
 public sealed class CompanyStateSyncService
 {
-    private readonly AccessTools.FieldRef<MoneyControllerType, double> _totalProfitRef = AccessTools.FieldRefAccess<MoneyControllerType, double>("totalProfit");
     private readonly CompanyOwnershipService _companyOwnershipService;
     private readonly Dictionary<int, CompanyStateSnapshotMessage> _latestSnapshots = new Dictionary<int, CompanyStateSnapshotMessage>();
     private readonly Dictionary<int, string> _lastAppliedFingerprints = new Dictionary<int, string>();
 
     private float _nextSendAt;
+    private float _nextRemotePrivateClearAt;
     private string? _lastSentFingerprint;
 
     public CompanyStateSyncService(CompanyOwnershipService companyOwnershipService)
@@ -68,7 +66,7 @@ public sealed class CompanyStateSyncService
         }
 
         HandleIncomingSnapshot(snapshot);
-        client.Send(snapshot);
+        client.Send(CreatePublicSnapshot(snapshot));
     }
 
     public void HandleIncomingSnapshot(CompanyStateSnapshotMessage snapshot)
@@ -96,6 +94,7 @@ public sealed class CompanyStateSyncService
                     ObjectId = inventory.ObjectId,
                     ObjectName = inventory.ObjectName,
                     Facilities = inventory.Facilities
+                        .Where(facility => facility.Quantity > 0)
                         .Select(facility => new FacilitySnapshotDto
                         {
                             DescriptorId = facility.DescriptorId,
@@ -113,16 +112,10 @@ public sealed class CompanyStateSyncService
 
     public void ApplyRemoteSnapshots(int localCompanySlot)
     {
+        var shouldClearPrivateState = UnityEngine.Time.unscaledTime >= _nextRemotePrivateClearAt;
         foreach (var snapshot in _latestSnapshots.Values.OrderBy(x => x.CompanySlot))
         {
             if (snapshot.CompanySlot == localCompanySlot)
-            {
-                continue;
-            }
-
-            var fingerprint = JsonConvert.SerializeObject(snapshot);
-            if (_lastAppliedFingerprints.TryGetValue(snapshot.CompanySlot, out var lastFingerprint) &&
-                string.Equals(lastFingerprint, fingerprint, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -132,10 +125,32 @@ public sealed class CompanyStateSyncService
                 continue;
             }
 
-            ApplyMoneyState(company, snapshot);
-            ApplyResearchState(company, snapshot);
+            _companyOwnershipService.SetCompanyDisplayName(snapshot.CompanySlot, snapshot.CompanyName);
+            _companyOwnershipService.ApplyDisplayNamesToGame();
+            if (shouldClearPrivateState)
+            {
+                ClearRemoteCompanyPrivateState(company);
+            }
+
+            var fingerprint = JsonConvert.SerializeObject(snapshot);
+            if (_lastAppliedFingerprints.TryGetValue(snapshot.CompanySlot, out var lastFingerprint) &&
+                string.Equals(lastFingerprint, fingerprint, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!shouldClearPrivateState)
+            {
+                ClearRemoteCompanyPrivateState(company);
+            }
+
             ApplyInventoryState(company, snapshot);
             _lastAppliedFingerprints[snapshot.CompanySlot] = fingerprint;
+        }
+
+        if (shouldClearPrivateState)
+        {
+            _nextRemotePrivateClearAt = UnityEngine.Time.unscaledTime + 0.5f;
         }
     }
 
@@ -167,7 +182,9 @@ public sealed class CompanyStateSyncService
             MessageType = nameof(CompanyStateSnapshotMessage),
             CompanySlot = localCompanySlot,
             CompanyId = company.ID ?? string.Empty,
-            CompanyName = company.name ?? company.ID ?? $"Company {localCompanySlot}",
+            CompanyName = _companyOwnershipService.TryGetCompanyDisplayName(localCompanySlot, out var displayName)
+                ? displayName
+                : company.name ?? company.ID ?? $"Company {localCompanySlot}",
             OwnerPlayerName = localPlayerName,
             Money = company.MoneyController?.CurrentMoney ?? 0,
             TotalProfit = company.MoneyController?.TotalProfit ?? 0,
@@ -258,17 +275,6 @@ public sealed class CompanyStateSyncService
         });
     }
 
-    private void ApplyMoneyState(GameCompany company, CompanyStateSnapshotMessage snapshot)
-    {
-        if (company.MoneyController == null)
-        {
-            return;
-        }
-
-        company.MoneyController.ForCheatSetCurrentMony(snapshot.Money);
-        _totalProfitRef(company.MoneyController) = snapshot.TotalProfit;
-    }
-
     private static void PopulateInventories(CompanyStateSnapshotMessage snapshot, GameCompany company)
     {
         var objectInfos = UnityEngine.Object.FindObjectsOfType<GameObjectInfo>();
@@ -284,34 +290,22 @@ public sealed class CompanyStateSyncService
             {
                 ObjectId = objectInfo.id,
                 ObjectName = objectInfo.ObjectName ?? $"Object {objectInfo.id}",
-                ConstructionEquipmentCount = objectInfoData.ConstructionEquipmentCount,
-                Resources = objectInfoData.ListRowResourcesData?
-                    .Where(x => x != null && x.ResourcesType != null)
-                    .Select(x => new ResourceStackDto
-                    {
-                        ResourceId = x.ResourcesType.ID,
-                        Value = x.Value,
-                        ResourceState = (int)x.ResourceState,
-                        ForcePrimary = x.ForcePrimary,
-                        MiningFactor = x.MiningFactor
-                    })
-                    .OrderBy(x => x.ResourceId)
-                    .ToList() ?? new List<ResourceStackDto>(),
                 Facilities = objectInfoData.ListFacility?
-                    .Where(x => x != null && x.facilityDescriptor != null)
-                    .Select(x => new FacilitySnapshotDto
+                    .Where(x => x != null && x.facilityDescriptor != null && x.FinishConstructionBool && x.Quantity > 0)
+                    .GroupBy(x => x.facilityDescriptor.ID)
+                    .Select(group => new FacilitySnapshotDto
                     {
-                        DescriptorId = x.facilityDescriptor.ID,
-                        Quantity = x.Quantity,
-                        Enabled = x.Enabled,
-                        HaveWorkers = x.HaveWorkers,
-                        ValidCanAddFacility = x.ValidCanAddFacility
+                        DescriptorId = group.Key,
+                        Quantity = group.Sum(x => Math.Max(0L, x.Quantity)),
+                        Enabled = group.Sum(x => Math.Max(0L, x.Enabled)),
+                        HaveWorkers = group.Sum(x => Math.Max(0L, x.HaveWorkers)),
+                        ValidCanAddFacility = group.Any(x => x.ValidCanAddFacility)
                     })
                     .OrderBy(x => x.DescriptorId)
                     .ToList() ?? new List<FacilitySnapshotDto>()
             };
 
-            if (inventory.ConstructionEquipmentCount > 0 || inventory.Resources.Count > 0 || inventory.Facilities.Count > 0)
+            if (inventory.Facilities.Count > 0)
             {
                 snapshot.OwnedInventories.Add(inventory);
             }
@@ -322,43 +316,16 @@ public sealed class CompanyStateSyncService
             .ToList();
     }
 
-    private static void ApplyResearchState(GameCompany company, CompanyStateSnapshotMessage snapshot)
-    {
-        if (company.ResearchManager == null)
-        {
-            return;
-        }
-
-        var data = new ResearchDataToSave
-        {
-            completeResearch = snapshot.CompletedResearchIds
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct()
-                .OrderBy(x => x)
-                .Select(x => new ResearchDefinitionSave { id = x })
-                .ToList(),
-            startNotFinish = new List<ResearchDataProgress>(),
-            dictionaryCandidateResearchList = new List<ResearchTypeKeyToListResearchDefinitionSave>(),
-            queueRD = new Queue<ResearchDefinition>(),
-            bonusFromObservatory = 0f
-        };
-
-        data.slot1 = null;
-        data.slot2 = null;
-        data.slot3 = null;
-
-        company.ResearchManager.SetDataFromSave(data);
-    }
-
     private void ApplyInventoryState(GameCompany company, CompanyStateSnapshotMessage snapshot)
     {
         var objectInfoManager = UnityEngine.Object.FindObjectOfType<ObjectInfoManager>();
         var scriptableObjectManager = UnityEngine.Object.FindObjectOfType<AllScriptableObjectManager>();
-        if (objectInfoManager == null || scriptableObjectManager?.AllResourceDefinitions == null)
+        if (objectInfoManager == null || scriptableObjectManager?.AllFacility == null)
         {
             return;
         }
 
+        var includedObjectIds = new HashSet<int>(snapshot.OwnedInventories.Select(x => x.ObjectId));
         foreach (var inventory in snapshot.OwnedInventories)
         {
             var objectInfo = objectInfoManager.GetByID(inventory.ObjectId);
@@ -373,33 +340,27 @@ public sealed class CompanyStateSyncService
                 continue;
             }
 
-            var rows = new List<RowResourcesDataType>();
-            foreach (var resource in inventory.Resources)
-            {
-                var resourceDefinition = scriptableObjectManager.AllResourceDefinitions.GetByID(resource.ResourceId);
-                if (resourceDefinition == null)
-                {
-                    continue;
-                }
-
-                var row = new RowResourcesDataType
-                {
-                    ResourcesType = resourceDefinition,
-                    ObjectInfoData = objectInfoData,
-                    Value = resource.Value,
-                    ResourceState = (RowResourcesDataType.EResourceState)resource.ResourceState,
-                    ForcePrimary = resource.ForcePrimary,
-                    MiningFactor = resource.MiningFactor
-                };
-
-                rows.Add(row);
-            }
-
-            objectInfoData.ListRowResourcesData = rows;
-            objectInfoData.ConstructionEquipmentCount = inventory.ConstructionEquipmentCount;
             ApplyFacilities(objectInfoData, inventory, scriptableObjectManager);
             objectInfoData.MarkIsDirty();
             objectInfoData.InvokeResourcesChange2();
+            objectInfoData.InvokeRefreshUIAddFacilityOrBuildProductItem();
+        }
+
+        foreach (var objectInfo in UnityEngine.Object.FindObjectsOfType<GameObjectInfo>())
+        {
+            if (includedObjectIds.Contains(objectInfo.id))
+            {
+                continue;
+            }
+
+            var objectInfoData = objectInfo.ObjectsInfoData?.FirstOrDefault(x => x != null && x.company == company);
+            if (objectInfoData?.ListFacility == null || objectInfoData.ListFacility.Count == 0)
+            {
+                continue;
+            }
+
+            ApplyFacilities(objectInfoData, new ObjectInventorySnapshotDto { ObjectId = objectInfo.id }, scriptableObjectManager);
+            objectInfoData.MarkIsDirty();
             objectInfoData.InvokeRefreshUIAddFacilityOrBuildProductItem();
         }
     }
@@ -412,29 +373,99 @@ public sealed class CompanyStateSyncService
             return;
         }
 
-        facilities.Clear();
-        foreach (var facilitySnapshot in inventory.Facilities)
-        {
-            if (string.IsNullOrWhiteSpace(facilitySnapshot.DescriptorId))
-            {
-                continue;
-            }
+        var desired = inventory.Facilities
+            .Where(x => !string.IsNullOrWhiteSpace(x.DescriptorId) && x.Quantity > 0)
+            .GroupBy(x => x.DescriptorId)
+            .ToDictionary(
+                group => group.Key,
+                group => new FacilitySnapshotDto
+                {
+                    DescriptorId = group.Key,
+                    Quantity = group.Sum(x => Math.Max(0L, x.Quantity)),
+                    Enabled = group.Sum(x => Math.Max(0L, x.Enabled)),
+                    HaveWorkers = group.Sum(x => Math.Max(0L, x.HaveWorkers)),
+                    ValidCanAddFacility = group.Any(x => x.ValidCanAddFacility)
+                });
 
+        foreach (var facility in facilities.ToArray())
+        {
+            var descriptorId = facility?.facilityDescriptor?.ID;
+            if (facility == null || string.IsNullOrWhiteSpace(descriptorId) || !facility.FinishConstructionBool || !desired.ContainsKey(descriptorId!))
+            {
+                RemoveFacilityWithoutRefund(objectInfoData, facility);
+            }
+        }
+
+        foreach (var facilitySnapshot in desired.Values.OrderBy(x => x.DescriptorId))
+        {
             var descriptor = scriptableObjectManager.AllFacility?.GetByID(facilitySnapshot.DescriptorId);
             if (descriptor == null)
             {
                 continue;
             }
 
-            var quantity = facilitySnapshot.Quantity < 0 ? 0 : facilitySnapshot.Quantity;
-            var facility = new FacilityType(descriptor, objectInfoData, quantity > int.MaxValue ? int.MaxValue : (int)quantity)
-            {
-                Enabled = facilitySnapshot.Enabled,
-                HaveWorkers = facilitySnapshot.HaveWorkers,
-                ValidCanAddFacility = facilitySnapshot.ValidCanAddFacility
-            };
+            var current = facilities.FirstOrDefault(x => x != null && x.facilityDescriptor == descriptor && x.FinishConstructionBool);
+            var currentQuantity = current?.Quantity ?? 0L;
+            var desiredQuantity = Math.Max(0L, facilitySnapshot.Quantity);
 
-            facilities.Add(facility);
+            if (currentQuantity < desiredQuantity)
+            {
+                var missing = Math.Min(desiredQuantity - currentQuantity, 10000L);
+                for (var i = 0L; i < missing; i++)
+                {
+                    objectInfoData.AddFacility(descriptor, prebuilt: true);
+                }
+            }
+            else if (current != null && currentQuantity > desiredQuantity)
+            {
+                current.Scrap(currentQuantity - desiredQuantity, addResourceOnScrap: false);
+            }
+
+            current = facilities.FirstOrDefault(x => x != null && x.facilityDescriptor == descriptor && x.FinishConstructionBool);
+            if (current == null)
+            {
+                continue;
+            }
+
+            current.Enabled = Math.Min(Math.Max(0L, facilitySnapshot.Enabled), current.Quantity);
+            current.HaveWorkers = Math.Min(Math.Max(0L, facilitySnapshot.HaveWorkers), current.Quantity);
+            current.ValidCanAddFacility = facilitySnapshot.ValidCanAddFacility;
+        }
+
+        objectInfoData.UpdateFacilityRelatedSummaries(resetHabitability: true);
+    }
+
+    private static void RemoveFacilityWithoutRefund(ObjectInfoDataType objectInfoData, FacilityType? facility)
+    {
+        if (facility == null)
+        {
+            return;
+        }
+
+        if (facility.Quantity > 0)
+        {
+            facility.Scrap(facility.Quantity, addResourceOnScrap: false);
+            return;
+        }
+
+        objectInfoData.RemoveProductionItem(facility);
+    }
+
+    private static void ClearRemoteCompanyPrivateState(GameCompany company)
+    {
+        var objectInfos = UnityEngine.Object.FindObjectsOfType<GameObjectInfo>();
+        foreach (var objectInfo in objectInfos)
+        {
+            var objectInfoData = objectInfo.ObjectsInfoData?.FirstOrDefault(x => x != null && x.company == company);
+            if (objectInfoData == null)
+            {
+                continue;
+            }
+
+            objectInfoData.ListRowResourcesData = new List<RowResourcesDataType>();
+            objectInfoData.ConstructionEquipmentCount = 0;
+            objectInfoData.MarkIsDirty();
+            objectInfoData.InvokeResourcesChange2();
         }
     }
 

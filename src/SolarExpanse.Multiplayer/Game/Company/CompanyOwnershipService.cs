@@ -11,12 +11,65 @@ namespace SolarExpanse.Multiplayer.Game.Company;
 public sealed class CompanyOwnershipService
 {
     private readonly Dictionary<Guid, int> _sessionCompanySlots = new Dictionary<Guid, int>();
+    private readonly Dictionary<int, string> _companyDisplayNames = new Dictionary<int, string>();
 
     public int LocalCompanySlot { get; private set; } = -1;
 
     public void SetLocalCompanySlot(int companySlot)
     {
         LocalCompanySlot = companySlot;
+    }
+
+    public void SetCompanyDisplayName(int companySlot, string? displayName)
+    {
+        if (companySlot < 0 || string.IsNullOrWhiteSpace(displayName))
+        {
+            return;
+        }
+
+        _companyDisplayNames[companySlot] = displayName!.Trim();
+    }
+
+    public bool TryGetCompanyDisplayName(int companySlot, out string displayName)
+    {
+        return _companyDisplayNames.TryGetValue(companySlot, out displayName) &&
+               !string.IsNullOrWhiteSpace(displayName);
+    }
+
+    public bool TryGetCompanyDisplayName(GameCompany? company, out string displayName)
+    {
+        displayName = string.Empty;
+        return TryGetSlotForCompany(company, out var slot) &&
+               TryGetCompanyDisplayName(slot, out displayName);
+    }
+
+    public void ApplyDisplayNamesToGame()
+    {
+        var manager = UnityEngine.Object.FindObjectOfType<GameManager>();
+        if (manager == null || manager.Companies == null)
+        {
+            return;
+        }
+
+        foreach (var pair in _companyDisplayNames)
+        {
+            if (pair.Key < 0 || pair.Key >= manager.Companies.Count)
+            {
+                continue;
+            }
+
+            var company = manager.Companies[pair.Key];
+            if (company == null || string.IsNullOrWhiteSpace(pair.Value))
+            {
+                continue;
+            }
+
+            company.name = pair.Value;
+            if (company.gameObject != null)
+            {
+                company.gameObject.name = pair.Value;
+            }
+        }
     }
 
     public int AssignCompanySlot(Guid sessionId, int requestedSlot, IReadOnlyCollection<int> inUseSlots, int maxCompanies)
@@ -56,7 +109,14 @@ public sealed class CompanyOwnershipService
         }
 
         return manager.Companies
-            .Select((company, index) => new CompanyDescriptor(index, company.ID, company.name))
+            .Select((company, index) =>
+            {
+                var displayName = TryGetCompanyDisplayName(index, out var mappedName)
+                    ? mappedName
+                    : company.name;
+
+                return new CompanyDescriptor(index, company.ID, displayName);
+            })
             .ToArray();
     }
 

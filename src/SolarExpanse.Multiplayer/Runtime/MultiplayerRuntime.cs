@@ -62,6 +62,11 @@ public sealed class MultiplayerRuntime : IDisposable
 
     public bool IsStorylineDisabled => _config.DisableStorylineSystems.Value;
 
+    public bool TryGetCompanyDisplayName(global::Game.Company? company, out string displayName)
+    {
+        return _companyOwnershipService.TryGetCompanyDisplayName(company, out displayName);
+    }
+
     public MultiplayerRuntime(ManualLogSource log, MultiplayerConfig config)
     {
         _log = log;
@@ -88,12 +93,20 @@ public sealed class MultiplayerRuntime : IDisposable
         _host.CompanyActionCommandReceived += OnCompanyActionCommandReceived;
         _client.Joined += OnJoined;
         _client.TimeSnapshotReceived += snapshot => _timeSyncService.QueueSnapshot(snapshot);
-        _client.CompanyStateReceived += snapshot => _companyStateSyncService.HandleIncomingSnapshot(snapshot);
+        _client.CompanyStateReceived += snapshot =>
+        {
+            _companyStateSyncService.HandleIncomingSnapshot(snapshot);
+            if (!string.IsNullOrWhiteSpace(snapshot.CompanyName))
+            {
+                _companyOwnershipService.SetCompanyDisplayName(snapshot.CompanySlot, snapshot.CompanyName);
+            }
+        };
         _client.CompanyActionResultReceived += OnCompanyActionResultReceived;
         _client.PresenceUpdated += presence =>
         {
             _latestPresence = presence;
             _hostPlayerName = presence.HostPlayerName;
+            RefreshCompanyDisplayNames();
             _status = $"Connected: {presence.Players.Count} remote player(s) visible.";
         };
         _client.StartGameReceived += OnStartGameReceived;
@@ -123,6 +136,8 @@ public sealed class MultiplayerRuntime : IDisposable
                 controller.SetTimescale(requestedTimeScale, false, false);
             }
         }
+
+        RefreshCompanyDisplayNames();
 
         if (_host.IsRunning)
         {
@@ -246,6 +261,7 @@ public sealed class MultiplayerRuntime : IDisposable
             return false;
         }
 
+        RefreshCompanyDisplayNames();
         _host.BroadcastStartGame();
         _activeStartSessionId = _host.CurrentStartSessionId;
         _sharedSessionStarted = true;
@@ -343,6 +359,8 @@ public sealed class MultiplayerRuntime : IDisposable
         _companySlotInput = requestedSlot.ToString();
         _config.RequestedCompanySlot.Value = requestedSlot;
         _companyOwnershipService.SetLocalCompanySlot(requestedSlot);
+        _companyOwnershipService.SetCompanyDisplayName(requestedSlot, _companyNameInput);
+        RefreshCompanyDisplayNames();
         if (_host.IsRunning)
         {
             _status = $"Hosting on port {_host.BoundPort}.";
@@ -366,6 +384,9 @@ public sealed class MultiplayerRuntime : IDisposable
         _companySlotInput = requestedSlot.ToString();
         _config.CompanyName.Value = _companyNameInput;
         _config.RequestedCompanySlot.Value = requestedSlot;
+        _companyOwnershipService.SetLocalCompanySlot(requestedSlot);
+        _companyOwnershipService.SetCompanyDisplayName(requestedSlot, _companyNameInput);
+        RefreshCompanyDisplayNames();
 
         if (_client.IsConnected)
         {
@@ -402,6 +423,8 @@ public sealed class MultiplayerRuntime : IDisposable
             return false;
         }
 
+        _companyOwnershipService.SetCompanyDisplayName(requestedSlot, companyName);
+        RefreshCompanyDisplayNames();
         _status = $"Hosting on port {_host.BoundPort}.";
         return true;
     }
@@ -432,6 +455,8 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         _companyOwnershipService.SetLocalCompanySlot(requestedSlot);
+        _companyOwnershipService.SetCompanyDisplayName(requestedSlot, _companyNameInput);
+        RefreshCompanyDisplayNames();
 
         _host.Start(
             port,
@@ -511,7 +536,9 @@ public sealed class MultiplayerRuntime : IDisposable
         _clientSessionId = message.SessionId;
         _hostPlayerName = message.HostPlayerName;
         _companyOwnershipService.SetLocalCompanySlot(message.AssignedCompanySlot);
+        _companyOwnershipService.SetCompanyDisplayName(message.AssignedCompanySlot, _companyNameInput);
         _companySlotInput = message.AssignedCompanySlot.ToString();
+        RefreshCompanyDisplayNames();
         _timeSyncService.QueueSnapshot(new TimeSnapshotMessage
         {
             MessageType = nameof(TimeSnapshotMessage),
@@ -530,6 +557,12 @@ public sealed class MultiplayerRuntime : IDisposable
         _sharedSessionStarted = true;
         _gameReadySent = false;
 
+        _companyOwnershipService.SetCompanyDisplayName(message.HostAssignedCompanySlot, message.HostCompanyName);
+        foreach (var player in message.Players)
+        {
+            _companyOwnershipService.SetCompanyDisplayName(player.AssignedCompanySlot, player.CompanyName);
+        }
+
         var localPlayer = message.Players.FirstOrDefault(player => player.SessionId == _clientSessionId);
         if (localPlayer != null)
         {
@@ -537,9 +570,11 @@ public sealed class MultiplayerRuntime : IDisposable
             _companySlotInput = localPlayer.AssignedCompanySlot.ToString();
             _startingCorporationInput = localPlayer.StartingCorporation;
             _companyOwnershipService.SetLocalCompanySlot(localPlayer.AssignedCompanySlot);
+            _companyOwnershipService.SetCompanyDisplayName(localPlayer.AssignedCompanySlot, localPlayer.CompanyName);
         }
 
         _maxCompaniesInput = message.MaxCompanySlots.ToString();
+        RefreshCompanyDisplayNames();
         _status = "Host started the shared session.";
         lock (_startGameLock)
         {
@@ -559,6 +594,7 @@ public sealed class MultiplayerRuntime : IDisposable
             return;
         }
 
+        RefreshCompanyDisplayNames();
         _gameReadySent = true;
         if (_host.IsRunning)
         {
@@ -709,6 +745,11 @@ public sealed class MultiplayerRuntime : IDisposable
             normalizedCompanyName = assignedCompany.name ?? assignedCompany.ID ?? normalizedCompanyName;
         }
 
+        if (!string.IsNullOrWhiteSpace(peer.CompanyName))
+        {
+            normalizedCompanyName = peer.CompanyName;
+        }
+
         var normalized = new CompanyStateSnapshotMessage
         {
             MessageType = nameof(CompanyStateSnapshotMessage),
@@ -726,8 +767,36 @@ public sealed class MultiplayerRuntime : IDisposable
         };
 
         var publicSnapshot = CompanyStateSyncService.CreatePublicSnapshot(normalized);
+        _companyOwnershipService.SetCompanyDisplayName(peer.AssignedCompanySlot, normalizedCompanyName);
+        RefreshCompanyDisplayNames();
         _companyStateSyncService.HandleIncomingSnapshot(publicSnapshot);
         _host.BroadcastExcept(peer.SessionId, publicSnapshot);
+    }
+
+    private void RefreshCompanyDisplayNames()
+    {
+        if (_companyOwnershipService.LocalCompanySlot >= 0)
+        {
+            _companyOwnershipService.SetCompanyDisplayName(_companyOwnershipService.LocalCompanySlot, _companyNameInput);
+        }
+
+        if (_host.IsRunning)
+        {
+            foreach (var peer in _host.Peers)
+            {
+                _companyOwnershipService.SetCompanyDisplayName(peer.AssignedCompanySlot, peer.CompanyName);
+            }
+        }
+        else
+        {
+            _companyOwnershipService.SetCompanyDisplayName(_latestPresence.HostAssignedCompanySlot, _latestPresence.HostCompanyName);
+            foreach (var player in _latestPresence.Players)
+            {
+                _companyOwnershipService.SetCompanyDisplayName(player.AssignedCompanySlot, player.CompanyName);
+            }
+        }
+
+        _companyOwnershipService.ApplyDisplayNamesToGame();
     }
 
     private void DrawWindowContents()
