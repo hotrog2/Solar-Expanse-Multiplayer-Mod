@@ -85,6 +85,17 @@ public sealed class CompanyActionResultMessage : NetMessage
     public string Reason { get; set; } = string.Empty;
 }
 
+public sealed class ChatMessage : NetMessage
+{
+    public Guid MessageId { get; set; }
+    public Guid SenderSessionId { get; set; }
+    public int CompanySlot { get; set; }
+    public string PlayerName { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
+    public long SentUtcTicks { get; set; }
+}
+
 public sealed class PlayerPresenceDto
 {
     public Guid SessionId { get; set; }

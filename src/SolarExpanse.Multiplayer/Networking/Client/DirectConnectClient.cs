@@ -24,6 +24,7 @@ public sealed class DirectConnectClient : IDisposable
     public event Action<PlayerPresenceMessage>? PresenceUpdated;
     public event Action<StartGameMessage>? StartGameReceived;
     public event Action<CompanyActionResultMessage>? CompanyActionResultReceived;
+    public event Action<ChatMessage>? ChatMessageReceived;
     public event Action<CompanyStateSnapshotMessage>? CompanyStateReceived;
     public event Action? Disconnected;
 
@@ -151,6 +152,9 @@ public sealed class DirectConnectClient : IDisposable
                         break;
                     case CompanyActionResultMessage actionResult:
                         CompanyActionResultReceived?.Invoke(actionResult);
+                        break;
+                    case ChatMessage chatMessage:
+                        ChatMessageReceived?.Invoke(chatMessage);
                         break;
                     case CompanyStateSnapshotMessage companyState:
                         CompanyStateReceived?.Invoke(companyState);

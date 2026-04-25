@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using BepInEx.Logging;
 using Manager;
@@ -25,6 +26,8 @@ public sealed class MultiplayerRuntime : IDisposable
     private readonly CompanyStateSyncService _companyStateSyncService;
     private readonly ConcurrentQueue<float> _pendingTimeScaleRequests = new ConcurrentQueue<float>();
     private readonly object _startGameLock = new object();
+    private readonly object _chatLock = new object();
+    private readonly List<ChatMessage> _chatMessages = new List<ChatMessage>();
     private PlayerPresenceMessage _latestPresence = new PlayerPresenceMessage();
     private StartGameMessage? _pendingStartGame;
     private Guid _activeStartSessionId = Guid.Empty;
@@ -32,6 +35,9 @@ public sealed class MultiplayerRuntime : IDisposable
     private bool _gameReadySent;
 
     private readonly Rect _windowRect = new Rect(20f, 20f, 430f, 360f);
+    private Rect _multiplayerWindowRect = new Rect(20f, 390f, 560f, 430f);
+    private Vector2 _playersScroll;
+    private Vector2 _chatScroll;
 
     private string _status = "Idle";
     private string _addressInput;
@@ -41,6 +47,7 @@ public sealed class MultiplayerRuntime : IDisposable
     private string _companySlotInput;
     private string _maxCompaniesInput;
     private string _startingCorporationInput = "Solex";
+    private string _chatInput = string.Empty;
     private Guid _clientSessionId = Guid.Empty;
     private string _hostPlayerName = string.Empty;
 
@@ -91,6 +98,7 @@ public sealed class MultiplayerRuntime : IDisposable
         _host.CompanyStateSnapshotReceived += OnCompanyStateSnapshotReceived;
         _host.GameReadyReceived += OnGameReadyReceived;
         _host.CompanyActionCommandReceived += OnCompanyActionCommandReceived;
+        _host.ChatMessageReceived += OnHostChatMessageReceived;
         _client.Joined += OnJoined;
         _client.TimeSnapshotReceived += snapshot => _timeSyncService.QueueSnapshot(snapshot);
         _client.CompanyStateReceived += snapshot =>
@@ -102,6 +110,7 @@ public sealed class MultiplayerRuntime : IDisposable
             }
         };
         _client.CompanyActionResultReceived += OnCompanyActionResultReceived;
+        _client.ChatMessageReceived += AddChatMessage;
         _client.PresenceUpdated += presence =>
         {
             _latestPresence = presence;
@@ -154,12 +163,15 @@ public sealed class MultiplayerRuntime : IDisposable
 
     public void DrawGui()
     {
-        if (!_config.ShowDebugWindow.Value)
+        if (_config.ShowDebugWindow.Value)
         {
-            return;
+            GUILayout.Window(17291, _windowRect, _ => DrawWindowContents(), "Solar Expanse Multiplayer");
         }
 
-        GUILayout.Window(17291, _windowRect, _ => DrawWindowContents(), "Solar Expanse Multiplayer");
+        if (ShouldDrawMultiplayerWindow())
+        {
+            _multiplayerWindowRect = GUILayout.Window(17292, _multiplayerWindowRect, _ => DrawMultiplayerWindowContents(), "Multiplayer Status");
+        }
     }
 
     public void OnTimeControllerUpdated(TimeController controller)
@@ -701,6 +713,91 @@ public sealed class MultiplayerRuntime : IDisposable
         _log.LogWarning(_status);
     }
 
+    private void OnHostChatMessageReceived(HostPeerState peer, ChatMessage message)
+    {
+        var normalized = NormalizeChatMessage(message, peer.SessionId, peer.PlayerName, peer.CompanyName, peer.AssignedCompanySlot);
+        AddChatMessage(normalized);
+        _host.Broadcast(normalized);
+    }
+
+    private void SendChatMessage()
+    {
+        var text = (_chatInput ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        _chatInput = string.Empty;
+        var message = CreateLocalChatMessage(text);
+        if (_host.IsRunning)
+        {
+            AddChatMessage(message);
+            _host.Broadcast(message);
+            return;
+        }
+
+        if (_client.IsConnected)
+        {
+            _client.Send(message);
+            return;
+        }
+
+        AddChatMessage(message);
+    }
+
+    private ChatMessage CreateLocalChatMessage(string text)
+    {
+        return new ChatMessage
+        {
+            MessageType = nameof(ChatMessage),
+            MessageId = Guid.NewGuid(),
+            SenderSessionId = _clientSessionId,
+            CompanySlot = _companyOwnershipService.LocalCompanySlot,
+            PlayerName = string.IsNullOrWhiteSpace(_playerNameInput) ? "Player" : _playerNameInput.Trim(),
+            CompanyName = string.IsNullOrWhiteSpace(_companyNameInput) ? "Company" : _companyNameInput.Trim(),
+            Text = Truncate(text, 240),
+            SentUtcTicks = DateTime.UtcNow.Ticks
+        };
+    }
+
+    private static ChatMessage NormalizeChatMessage(ChatMessage message, Guid senderSessionId, string playerName, string companyName, int companySlot)
+    {
+        return new ChatMessage
+        {
+            MessageType = nameof(ChatMessage),
+            MessageId = message.MessageId == Guid.Empty ? Guid.NewGuid() : message.MessageId,
+            SenderSessionId = senderSessionId,
+            CompanySlot = companySlot,
+            PlayerName = Truncate(string.IsNullOrWhiteSpace(playerName) ? "Player" : playerName.Trim(), 48),
+            CompanyName = Truncate(string.IsNullOrWhiteSpace(companyName) ? $"Company {companySlot}" : companyName.Trim(), 64),
+            Text = Truncate((message.Text ?? string.Empty).Trim(), 240),
+            SentUtcTicks = message.SentUtcTicks > 0 ? message.SentUtcTicks : DateTime.UtcNow.Ticks
+        };
+    }
+
+    private void AddChatMessage(ChatMessage message)
+    {
+        if (string.IsNullOrWhiteSpace(message.Text))
+        {
+            return;
+        }
+
+        lock (_chatLock)
+        {
+            if (_chatMessages.Any(x => x.MessageId == message.MessageId && message.MessageId != Guid.Empty))
+            {
+                return;
+            }
+
+            _chatMessages.Add(message);
+            if (_chatMessages.Count > 100)
+            {
+                _chatMessages.RemoveRange(0, _chatMessages.Count - 100);
+            }
+        }
+    }
+
     private void SendKnownSnapshotsToAllPeers()
     {
         foreach (var peer in _host.Peers)
@@ -799,6 +896,260 @@ public sealed class MultiplayerRuntime : IDisposable
         _companyOwnershipService.ApplyDisplayNamesToGame();
     }
 
+    private bool ShouldDrawMultiplayerWindow()
+    {
+        return _host.IsRunning ||
+               _client.IsConnected ||
+               _sharedSessionStarted ||
+               _latestPresence.Players.Count > 0;
+    }
+
+    private void DrawMultiplayerWindowContents()
+    {
+        var rows = BuildPlayerStatusRows();
+        GUILayout.Label(GetConnectionStatusText());
+        GUILayout.Label(GetSyncStatusText(rows));
+        GUILayout.Space(6f);
+
+        GUILayout.Label("Connected Players");
+        GUILayout.BeginHorizontal();
+        GUILayout.Label("Player", GUILayout.Width(115f));
+        GUILayout.Label("Company", GUILayout.Width(145f));
+        GUILayout.Label("Money", GUILayout.Width(95f));
+        GUILayout.Label("Sync", GUILayout.ExpandWidth(true));
+        GUILayout.EndHorizontal();
+
+        _playersScroll = GUILayout.BeginScrollView(_playersScroll, GUILayout.Height(110f));
+        foreach (var row in rows)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(row.PlayerName, GUILayout.Width(115f));
+            GUILayout.Label(row.CompanyName, GUILayout.Width(145f));
+            GUILayout.Label(row.Money, GUILayout.Width(95f));
+            GUILayout.Label(row.SyncStatus, GUILayout.ExpandWidth(true));
+            GUILayout.EndHorizontal();
+        }
+        GUILayout.EndScrollView();
+
+        GUILayout.Space(6f);
+        GUILayout.Label("Chat");
+        _chatScroll = GUILayout.BeginScrollView(_chatScroll, GUILayout.Height(150f));
+        foreach (var message in GetChatMessagesSnapshot())
+        {
+            var sent = message.SentUtcTicks > 0
+                ? new DateTime(message.SentUtcTicks, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
+                : "--:--";
+            var ownMessage = _host.IsRunning
+                ? message.SenderSessionId == Guid.Empty
+                : message.SenderSessionId == _clientSessionId;
+            var senderName = ownMessage ? "You" : Truncate(message.PlayerName, 24);
+            var companyName = Truncate(message.CompanyName, 28);
+            GUILayout.Label($"[{sent}] {senderName} / {companyName}: {message.Text}");
+        }
+        GUILayout.EndScrollView();
+
+        GUILayout.BeginHorizontal();
+        GUI.SetNextControlName("MultiplayerChatInput");
+        _chatInput = GUILayout.TextField(_chatInput ?? string.Empty, GUILayout.ExpandWidth(true));
+        var sendClicked = GUILayout.Button("Send", GUILayout.Width(70f));
+        GUILayout.EndHorizontal();
+
+        var enterPressed = Event.current.type == EventType.KeyDown &&
+                           Event.current.keyCode == KeyCode.Return &&
+                           GUI.GetNameOfFocusedControl() == "MultiplayerChatInput";
+        if (sendClicked || enterPressed)
+        {
+            SendChatMessage();
+            if (enterPressed)
+            {
+                Event.current.Use();
+            }
+        }
+
+        GUI.DragWindow(new Rect(0f, 0f, 10000f, 22f));
+    }
+
+    private List<PlayerStatusRow> BuildPlayerStatusRows()
+    {
+        var rows = new List<PlayerStatusRow>();
+        if (_host.IsRunning)
+        {
+            rows.Add(CreatePlayerStatusRow(
+                Guid.Empty,
+                _playerNameInput,
+                _companyNameInput,
+                _companyOwnershipService.LocalCompanySlot,
+                isLocal: true,
+                ready: true));
+
+            rows.AddRange(_host.Peers
+                .OrderBy(peer => peer.AssignedCompanySlot)
+                .Select(peer => CreatePlayerStatusRow(
+                    peer.SessionId,
+                    peer.PlayerName,
+                    peer.CompanyName,
+                    peer.AssignedCompanySlot,
+                    isLocal: false,
+                    ready: peer.IsGameReady)));
+
+            return rows;
+        }
+
+        if (_client.IsConnected || _latestPresence.Players.Count > 0)
+        {
+            rows.Add(CreatePlayerStatusRow(
+                Guid.Empty,
+                _latestPresence.HostPlayerName,
+                _latestPresence.HostCompanyName,
+                _latestPresence.HostAssignedCompanySlot,
+                isLocal: false,
+                ready: true));
+
+            rows.AddRange(_latestPresence.Players
+                .OrderBy(player => player.AssignedCompanySlot)
+                .Select(player => CreatePlayerStatusRow(
+                    player.SessionId,
+                    player.PlayerName,
+                    player.CompanyName,
+                    player.AssignedCompanySlot,
+                    isLocal: player.SessionId == _clientSessionId,
+                    ready: true)));
+        }
+
+        if (!rows.Any(row => row.IsLocal) && _companyOwnershipService.LocalCompanySlot >= 0)
+        {
+            rows.Add(CreatePlayerStatusRow(
+                _clientSessionId,
+                _playerNameInput,
+                _companyNameInput,
+                _companyOwnershipService.LocalCompanySlot,
+                isLocal: true,
+                ready: _gameReadySent));
+        }
+
+        return rows;
+    }
+
+    private PlayerStatusRow CreatePlayerStatusRow(Guid sessionId, string playerName, string companyName, int companySlot, bool isLocal, bool ready)
+    {
+        var syncStatus = GetPlayerSyncStatus(companySlot, isLocal, ready);
+        return new PlayerStatusRow(
+            sessionId,
+            Truncate(string.IsNullOrWhiteSpace(playerName) ? "Player" : playerName.Trim(), 18),
+            Truncate(string.IsNullOrWhiteSpace(companyName) ? $"Company {companySlot}" : companyName.Trim(), 24),
+            companySlot,
+            GetMoneyText(companySlot, isLocal),
+            syncStatus,
+            isLocal);
+    }
+
+    private string GetConnectionStatusText()
+    {
+        if (_host.IsRunning)
+        {
+            return $"Hosting on port {_host.BoundPort} | Clients: {_host.Peers.Count}";
+        }
+
+        if (_client.IsConnected)
+        {
+            return $"Connected to {_hostPlayerName}";
+        }
+
+        return _sharedSessionStarted ? "Shared session active" : "Multiplayer inactive";
+    }
+
+    private string GetSyncStatusText(IReadOnlyCollection<PlayerStatusRow> rows)
+    {
+        var snapshotCount = _companyStateSyncService.LatestSnapshots.Count;
+        var facilityCount = _companyStateSyncService.LatestSnapshots.Values.Sum(snapshot => snapshot.OwnedInventories.Sum(inventory => inventory.Facilities.Count));
+        if (_host.IsRunning)
+        {
+            return $"Sync: {snapshotCount} company state(s), {facilityCount} completed facility type(s) | Ready: {_host.Peers.Count(peer => peer.IsGameReady)} / {_host.Peers.Count}";
+        }
+
+        return $"Sync: {snapshotCount} company state(s), {facilityCount} completed facility type(s) | Players: {rows.Count}";
+    }
+
+    private string GetPlayerSyncStatus(int companySlot, bool isLocal, bool ready)
+    {
+        if (isLocal)
+        {
+            return _sharedSessionStarted ? "Local" : "Lobby";
+        }
+
+        if (!_sharedSessionStarted)
+        {
+            return "Lobby";
+        }
+
+        if (_companyStateSyncService.LatestSnapshots.ContainsKey(companySlot))
+        {
+            return "Synced";
+        }
+
+        return ready ? "Waiting for state" : "Loading";
+    }
+
+    private string GetMoneyText(int companySlot, bool isLocal)
+    {
+        if (isLocal && TryGetCurrentMoney(companySlot, out var localMoney))
+        {
+            return FormatMoney(localMoney);
+        }
+
+        if (_companyStateSyncService.LatestSnapshots.TryGetValue(companySlot, out var snapshot))
+        {
+            return FormatMoney(snapshot.Money);
+        }
+
+        return "Waiting";
+    }
+
+    private bool TryGetCurrentMoney(int companySlot, out double money)
+    {
+        money = 0;
+        if (!_companyOwnershipService.TryGetCompanyBySlot(companySlot, out var company) || company?.MoneyController == null)
+        {
+            return false;
+        }
+
+        money = company.MoneyController.CurrentMoney;
+        return true;
+    }
+
+    private static string FormatMoney(double money)
+    {
+        if (double.IsNaN(money) || double.IsInfinity(money))
+        {
+            return "$0";
+        }
+
+        return "$" + money.ToString("N0", CultureInfo.InvariantCulture);
+    }
+
+    private ChatMessage[] GetChatMessagesSnapshot()
+    {
+        lock (_chatLock)
+        {
+            return _chatMessages.ToArray();
+        }
+    }
+
+    private static string Truncate(string value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= maxLength)
+        {
+            return value ?? string.Empty;
+        }
+
+        if (maxLength <= 3)
+        {
+            return value.Substring(0, maxLength);
+        }
+
+        return value.Substring(0, maxLength - 3) + "...";
+    }
+
     private void DrawWindowContents()
     {
         GUILayout.Label("Session Status");
@@ -889,4 +1240,26 @@ public sealed class MultiplayerRuntime : IDisposable
         _client.Dispose();
         _host.Dispose();
     }
+}
+
+internal sealed class PlayerStatusRow
+{
+    public PlayerStatusRow(Guid sessionId, string playerName, string companyName, int companySlot, string money, string syncStatus, bool isLocal)
+    {
+        SessionId = sessionId;
+        PlayerName = playerName;
+        CompanyName = companyName;
+        CompanySlot = companySlot;
+        Money = money;
+        SyncStatus = syncStatus;
+        IsLocal = isLocal;
+    }
+
+    public Guid SessionId { get; }
+    public string PlayerName { get; }
+    public string CompanyName { get; }
+    public int CompanySlot { get; }
+    public string Money { get; }
+    public string SyncStatus { get; }
+    public bool IsLocal { get; }
 }

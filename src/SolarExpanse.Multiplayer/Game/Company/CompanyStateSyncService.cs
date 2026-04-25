@@ -88,6 +88,7 @@ public sealed class CompanyStateSyncService
             CompanyId = snapshot.CompanyId,
             CompanyName = snapshot.CompanyName,
             OwnerPlayerName = snapshot.OwnerPlayerName,
+            Money = snapshot.Money,
             OwnedInventories = snapshot.OwnedInventories
                 .Select(inventory => new ObjectInventorySnapshotDto
                 {

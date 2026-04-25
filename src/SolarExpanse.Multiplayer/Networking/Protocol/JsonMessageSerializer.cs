@@ -28,6 +28,7 @@ public static class JsonMessageSerializer
             nameof(GameReadyMessage) => obj.ToObject<GameReadyMessage>() ?? throw new InvalidOperationException("Invalid GameReadyMessage payload."),
             nameof(CompanyActionCommandMessage) => obj.ToObject<CompanyActionCommandMessage>() ?? throw new InvalidOperationException("Invalid CompanyActionCommandMessage payload."),
             nameof(CompanyActionResultMessage) => obj.ToObject<CompanyActionResultMessage>() ?? throw new InvalidOperationException("Invalid CompanyActionResultMessage payload."),
+            nameof(ChatMessage) => obj.ToObject<ChatMessage>() ?? throw new InvalidOperationException("Invalid ChatMessage payload."),
             nameof(CompanyStateSnapshotMessage) => obj.ToObject<CompanyStateSnapshotMessage>() ?? throw new InvalidOperationException("Invalid CompanyStateSnapshotMessage payload."),
             _ => throw new InvalidOperationException($"Unknown message type '{type}'.")
         };
