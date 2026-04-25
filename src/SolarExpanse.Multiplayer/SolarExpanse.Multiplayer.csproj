@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>SolarExpanse.Multiplayer</AssemblyName>
+    <RootNamespace>SolarExpanse.Multiplayer</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json;https://nuget.bepinex.dev/v3/index.json</RestoreAdditionalProjectSources>
+    <SolarExpanseGameRoot Condition="'$(SolarExpanseGameRoot)' == ''">$(MSBuildThisFileDirectory)..\..\..\..\..</SolarExpanseGameRoot>
+  </PropertyGroup>
+
+  <Target Name="ValidateSolarExpanseGameRoot" BeforeTargets="ResolveReferences">
+    <Error
+      Condition="!Exists('$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\Assembly-CSharp.dll')"
+      Text="SolarExpanseGameRoot must point to the Solar Expanse game folder. Pass /p:SolarExpanseGameRoot=&quot;C:\Path\To\Solar Expanse&quot;." />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.BaseLib" Version="5.4.21" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="HarmonyX" Version="2.10.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\UnityEngine.dll</HintPath>
+      <Aliases>unitylegacy</Aliases>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>$(SolarExpanseGameRoot)\Solar Expanse_Data\Managed\Sirenix.Serialization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

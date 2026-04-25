@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+**/bin/
+**/obj/
+
+# Restored/local package caches
+packages/
+*.nupkg
+
+# Temporary test harness output
+tests/FlowSmoke/
+
+# IDE/user-local state
+.vs/
+*.user
+*.suo
