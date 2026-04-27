@@ -13,11 +13,19 @@ public sealed class TimeSyncService
     private TimeSnapshotMessage? _pendingSnapshot;
     private float _nextHostBroadcastAt;
     private int _sequence;
+    private int _lastQueuedSequence;
+    private int _lastAppliedSequence;
 
     public bool IsApplyingRemoteSnapshot { get; private set; }
 
     public void QueueSnapshot(TimeSnapshotMessage snapshot)
     {
+        if (snapshot.Sequence > 0 && snapshot.Sequence <= _lastQueuedSequence)
+        {
+            return;
+        }
+
+        _lastQueuedSequence = Math.Max(_lastQueuedSequence, snapshot.Sequence);
         _pendingSnapshot = snapshot;
     }
 
@@ -28,7 +36,7 @@ public sealed class TimeSyncService
             return;
         }
 
-        _nextHostBroadcastAt = UnityEngine.Time.unscaledTime + 0.25f;
+        _nextHostBroadcastAt = UnityEngine.Time.unscaledTime + 0.5f;
 
         host.Broadcast(new TimeSnapshotMessage
         {
@@ -46,10 +54,18 @@ public sealed class TimeSyncService
             return;
         }
 
+        var snapshot = _pendingSnapshot;
+        if (snapshot.Sequence > 0 && snapshot.Sequence <= _lastAppliedSequence)
+        {
+            _pendingSnapshot = null;
+            return;
+        }
+
         try
         {
             IsApplyingRemoteSnapshot = true;
-            _facade.ApplySnapshot(controller, _pendingSnapshot.GameTimeTicks, _pendingSnapshot.TimeScale);
+            _facade.ApplySnapshot(controller, snapshot.GameTimeTicks, snapshot.TimeScale);
+            _lastAppliedSequence = Math.Max(_lastAppliedSequence, snapshot.Sequence);
         }
         finally
         {

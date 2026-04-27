@@ -29,8 +29,8 @@ public sealed class CompanyStateSyncService
     private readonly Dictionary<int, string> _lastAppliedFingerprints = new Dictionary<int, string>();
 
     private float _nextSendAt;
-    private float _nextRemotePrivateClearAt;
     private string? _lastSentPublicFingerprint;
+    private bool _hasUnappliedSnapshots;
 
     public CompanyStateSyncService(CompanyOwnershipService companyOwnershipService)
     {
@@ -127,6 +127,7 @@ public sealed class CompanyStateSyncService
         }
 
         _latestSnapshots[snapshot.CompanySlot] = snapshot;
+        _hasUnappliedSnapshots = true;
         diagnostics.CompanySlot = snapshot.CompanySlot;
         diagnostics.LastSequence = Math.Max(diagnostics.LastSequence, snapshot.Sequence);
         diagnostics.LastReceivedUtcTicks = receivedTicks;
@@ -222,7 +223,11 @@ public sealed class CompanyStateSyncService
 
     public void ApplyRemoteSnapshots(int localCompanySlot)
     {
-        var shouldClearPrivateState = UnityEngine.Time.unscaledTime >= _nextRemotePrivateClearAt;
+        if (!_hasUnappliedSnapshots)
+        {
+            return;
+        }
+
         foreach (var snapshot in _latestSnapshots.Values.OrderBy(x => x.CompanySlot))
         {
             if (snapshot.CompanySlot == localCompanySlot)
@@ -237,14 +242,8 @@ public sealed class CompanyStateSyncService
 
             _companyOwnershipService.SetCompanyDisplayName(snapshot.CompanySlot, snapshot.CompanyName);
             _companyOwnershipService.ApplyDisplayNamesToGame();
-            if (shouldClearPrivateState)
-            {
-                ClearRemoteCompanyPrivateState(company);
-            }
 
-            var fingerprint = string.IsNullOrWhiteSpace(snapshot.SnapshotFingerprint)
-                ? ComputeSnapshotFingerprint(snapshot)
-                : snapshot.SnapshotFingerprint;
+            var fingerprint = ComputeApplyFingerprint(snapshot);
             if (!snapshot.FullSnapshot &&
                 _lastAppliedFingerprints.TryGetValue(snapshot.CompanySlot, out var lastFingerprint) &&
                 string.Equals(lastFingerprint, fingerprint, StringComparison.Ordinal))
@@ -252,11 +251,7 @@ public sealed class CompanyStateSyncService
                 continue;
             }
 
-            if (!shouldClearPrivateState)
-            {
-                ClearRemoteCompanyPrivateState(company);
-            }
-
+            ClearRemoteCompanyPrivateState(company);
             ApplyInventoryState(company, snapshot);
             if (_snapshotDiagnostics.TryGetValue(snapshot.CompanySlot, out var diagnostics))
             {
@@ -266,10 +261,7 @@ public sealed class CompanyStateSyncService
             _lastAppliedFingerprints[snapshot.CompanySlot] = fingerprint;
         }
 
-        if (shouldClearPrivateState)
-        {
-            _nextRemotePrivateClearAt = UnityEngine.Time.unscaledTime + 0.5f;
-        }
+        _hasUnappliedSnapshots = false;
     }
 
     private bool ShouldSend(int localCompanySlot)
@@ -778,6 +770,25 @@ public sealed class CompanyStateSyncService
                 {
                     x.ObjectId,
                     x.ObjectName,
+                    x.ObjectFingerprint
+                })
+                .ToArray()
+        };
+
+        return Sha256(JsonConvert.SerializeObject(canonical));
+    }
+
+    private static string ComputeApplyFingerprint(CompanyStateSnapshotMessage snapshot)
+    {
+        StampObjectFingerprints(snapshot);
+        var canonical = new
+        {
+            snapshot.CompanySlot,
+            Objects = snapshot.OwnedInventories
+                .OrderBy(x => x.ObjectId)
+                .Select(x => new
+                {
+                    x.ObjectId,
                     x.ObjectFingerprint
                 })
                 .ToArray()
