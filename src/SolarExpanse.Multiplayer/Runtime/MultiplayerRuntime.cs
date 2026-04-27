@@ -45,9 +45,11 @@ public sealed class MultiplayerRuntime : IDisposable
     private float _nextAutoResyncAt;
 
     private readonly Rect _windowRect = new Rect(20f, 20f, 430f, 360f);
-    private Rect _multiplayerWindowRect = new Rect(20f, 390f, 640f, 560f);
+    private readonly Rect _overlayButtonRect = new Rect(12f, 120f, 150f, 34f);
+    private Rect _multiplayerWindowRect = new Rect(20f, 170f, 660f, 560f);
     private Vector2 _playersScroll;
     private Vector2 _chatScroll;
+    private bool _showMultiplayerOverlay = true;
 
     private string _status = "Idle";
     private string _addressInput;
@@ -188,16 +190,34 @@ public sealed class MultiplayerRuntime : IDisposable
         _companyStateSyncService.ApplyRemoteSnapshots(_companyOwnershipService.LocalCompanySlot);
         TryAutoRequestResync();
         TrySendGameReady();
+
     }
 
     public void DrawGui()
     {
+        if (_config.ShowInGameOverlay.Value &&
+            Event.current.type == EventType.KeyDown &&
+            Event.current.keyCode == KeyCode.F8)
+        {
+            _showMultiplayerOverlay = !_showMultiplayerOverlay;
+            Event.current.Use();
+        }
+
         if (_config.ShowDebugWindow.Value)
         {
             GUILayout.Window(17291, _windowRect, _ => DrawWindowContents(), "Solar Expanse Multiplayer");
         }
 
-        if (ShouldDrawMultiplayerWindow())
+        if (_config.ShowInGameOverlay.Value && ShouldDrawMultiplayerOverlayButton())
+        {
+            var label = _showMultiplayerOverlay ? "Hide MP Status (F8)" : "Show MP Status (F8)";
+            if (GUI.Button(_overlayButtonRect, label))
+            {
+                _showMultiplayerOverlay = !_showMultiplayerOverlay;
+            }
+        }
+
+        if (_config.ShowInGameOverlay.Value && _showMultiplayerOverlay && ShouldDrawMultiplayerWindow())
         {
             _multiplayerWindowRect = GUILayout.Window(17292, _multiplayerWindowRect, _ => DrawMultiplayerWindowContents(), "Multiplayer Status");
         }
@@ -1488,11 +1508,24 @@ public sealed class MultiplayerRuntime : IDisposable
                _latestPresence.Players.Count > 0;
     }
 
+    private bool ShouldDrawMultiplayerOverlayButton()
+    {
+        return ShouldDrawMultiplayerWindow() || IsGameWorldReady();
+    }
+
     private void DrawMultiplayerWindowContents()
     {
         var rows = BuildPlayerStatusRows();
+        GUILayout.BeginHorizontal();
         GUILayout.Label(GetConnectionStatusText());
+        if (GUILayout.Button("Hide", GUILayout.Width(60f)))
+        {
+            _showMultiplayerOverlay = false;
+        }
+
+        GUILayout.EndHorizontal();
         GUILayout.Label(GetSyncStatusText(rows));
+        GUILayout.Label(GetLocalTimeStatusText());
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Request Resync", GUILayout.Width(130f)))
         {
@@ -1677,6 +1710,17 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         return $"Sync: {snapshotCount} company state(s), {facilityCount} completed facility type(s) | Players: {rows.Count}";
+    }
+
+    private static string GetLocalTimeStatusText()
+    {
+        var controller = UnityEngine.Object.FindObjectOfType<TimeController>();
+        if (controller == null)
+        {
+            return "Time: waiting for game world";
+        }
+
+        return $"Time: {controller.CurrentTime:yyyy-MM-dd} | Scale: {controller.CurrentTimeScale:0.##}";
     }
 
     private string GetPlayerSyncStatus(int companySlot, bool isLocal, bool ready)

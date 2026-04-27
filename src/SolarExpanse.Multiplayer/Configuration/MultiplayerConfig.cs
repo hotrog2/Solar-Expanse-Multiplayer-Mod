@@ -14,6 +14,7 @@ public sealed class MultiplayerConfig
     public ConfigEntry<bool> DisableStorylineSystems { get; }
     public ConfigEntry<bool> AutoStart { get; }
     public ConfigEntry<bool> ShowDebugWindow { get; }
+    public ConfigEntry<bool> ShowInGameOverlay { get; }
 
     private MultiplayerConfig(
         ConfigEntry<MultiplayerMode> mode,
@@ -25,7 +26,8 @@ public sealed class MultiplayerConfig
         ConfigEntry<int> maxCompanies,
         ConfigEntry<bool> disableStorylineSystems,
         ConfigEntry<bool> autoStart,
-        ConfigEntry<bool> showDebugWindow)
+        ConfigEntry<bool> showDebugWindow,
+        ConfigEntry<bool> showInGameOverlay)
     {
         Mode = mode;
         PlayerName = playerName;
@@ -37,6 +39,7 @@ public sealed class MultiplayerConfig
         DisableStorylineSystems = disableStorylineSystems;
         AutoStart = autoStart;
         ShowDebugWindow = showDebugWindow;
+        ShowInGameOverlay = showInGameOverlay;
     }
 
     public static MultiplayerConfig Bind(ConfigFile config)
@@ -51,6 +54,7 @@ public sealed class MultiplayerConfig
             config.Bind("Gameplay", "MaxCompanies", 4, "Maximum number of company slots allowed in hosted multiplayer sessions."),
             config.Bind("Gameplay", "DisableStorylineSystems", true, "Disable contracts, tutorials, and default storyline-oriented mission prompts for multiplayer sandbox play."),
             config.Bind("General", "AutoStart", false, "Automatically start host/client mode on load."),
-            config.Bind("Debug", "ShowDebugWindow", true, "Show the IMGUI debug/control window."));
+            config.Bind("Debug", "ShowDebugWindow", false, "Show the legacy IMGUI debug/control window."),
+            config.Bind("UI", "ShowInGameOverlay", true, "Show the in-game multiplayer status/chat overlay and F8 toggle button."));
     }
 }

@@ -69,7 +69,14 @@ public sealed class SolarExpanseMultiplayerPlugin : BaseUnityPlugin
 
     private void OnGUI()
     {
-        Runtime?.DrawGui();
+        try
+        {
+            Runtime?.DrawGui();
+        }
+        catch (System.Exception ex)
+        {
+            Logger.LogWarning($"Multiplayer GUI draw failed: {ex}");
+        }
     }
 
     private void OnDestroy()
