@@ -36,7 +36,9 @@ internal static class ProductionItemActionPatches
             {
                 ["ProductionItemId"] = productionItem.ID.ToString(),
                 ["ProductionItemTypeId"] = productionItem.ProductionItemType?.ID ?? string.Empty,
-                ["BuildProgress"] = productionItem.BuildProgress.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ["BuildProgress"] = productionItem.BuildProgress.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["ObjectId"] = productionItem.ObjectInfoData?.ObjectInfo?.id.ToString() ?? string.Empty,
+                ["ObjectName"] = productionItem.ObjectInfoData?.ObjectInfo?.ObjectName ?? string.Empty
             };
 
             SolarExpanseMultiplayerPlugin.Runtime?.RecordPrivateCompanyActionForCompany(productionItem.Company, actionType, arguments);
@@ -119,6 +121,44 @@ internal static class ResearchActionPatches
         if (!string.IsNullOrWhiteSpace(id))
         {
             activeIds.Add(id!);
+        }
+    }
+}
+
+[HarmonyPatch(typeof(global::CustomUpdate.Spacecraft))]
+internal static class SpacecraftPublicEventPatches
+{
+    [HarmonyPostfix]
+    [HarmonyPatch("ChangeStage")]
+    private static void ChangeStagePostfix(global::CustomUpdate.Spacecraft __instance, global::CustomUpdate.Spacecraft.EPhase phase)
+    {
+        try
+        {
+            var actionType = phase switch
+            {
+                global::CustomUpdate.Spacecraft.EPhase.Launch => "SpacecraftLaunch",
+                global::CustomUpdate.Spacecraft.EPhase.Landing => "SpacecraftArrive",
+                _ => null
+            };
+
+            if (actionType == null)
+            {
+                return;
+            }
+
+            var arguments = new Dictionary<string, string>
+            {
+                ["SpacecraftName"] = __instance.spacecraftName ?? string.Empty,
+                ["MissionStart"] = __instance.MissionStart?.ObjectName ?? string.Empty,
+                ["MissionTarget"] = __instance.MissionTarget?.ObjectName ?? string.Empty,
+                ["CurrentObject"] = __instance.CurrentlyOnThisObject?.ObjectName ?? string.Empty
+            };
+
+            SolarExpanseMultiplayerPlugin.Runtime?.RecordPublicCompanyEventForCompany(__instance.GetCompany(), actionType, arguments);
+        }
+        catch (System.Exception ex)
+        {
+            SolarExpanseMultiplayerPlugin.Log?.LogWarning($"Failed to record spacecraft public event: {ex.Message}");
         }
     }
 }

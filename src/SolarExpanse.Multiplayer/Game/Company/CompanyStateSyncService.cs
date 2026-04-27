@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using Manager;
 using Newtonsoft.Json;
 using SolarExpanse.Multiplayer.Networking.Client;
@@ -21,11 +23,14 @@ public sealed class CompanyStateSyncService
 {
     private readonly CompanyOwnershipService _companyOwnershipService;
     private readonly Dictionary<int, CompanyStateSnapshotMessage> _latestSnapshots = new Dictionary<int, CompanyStateSnapshotMessage>();
+    private readonly Dictionary<int, CompanySnapshotDiagnostics> _snapshotDiagnostics = new Dictionary<int, CompanySnapshotDiagnostics>();
+    private readonly Dictionary<int, long> _nextSequences = new Dictionary<int, long>();
+    private readonly Dictionary<int, Dictionary<int, string>> _lastSentObjectFingerprints = new Dictionary<int, Dictionary<int, string>>();
     private readonly Dictionary<int, string> _lastAppliedFingerprints = new Dictionary<int, string>();
 
     private float _nextSendAt;
     private float _nextRemotePrivateClearAt;
-    private string? _lastSentFingerprint;
+    private string? _lastSentPublicFingerprint;
 
     public CompanyStateSyncService(CompanyOwnershipService companyOwnershipService)
     {
@@ -33,6 +38,7 @@ public sealed class CompanyStateSyncService
     }
 
     public IReadOnlyDictionary<int, CompanyStateSnapshotMessage> LatestSnapshots => _latestSnapshots;
+    public IReadOnlyDictionary<int, CompanySnapshotDiagnostics> SnapshotDiagnostics => _snapshotDiagnostics;
 
     public void TickHost(DirectConnectHost host, int localCompanySlot, string localPlayerName)
     {
@@ -47,9 +53,10 @@ public sealed class CompanyStateSyncService
             return;
         }
 
-        HandleIncomingSnapshot(snapshot);
+        var publicSnapshot = CreateOutgoingPublicSnapshot(snapshot, hostAuthoritative: true, fullSnapshot: false);
+        HandleIncomingSnapshot(publicSnapshot);
         ApplyRemoteSnapshots(localCompanySlot);
-        host.Broadcast(CreatePublicSnapshot(snapshot));
+        host.Broadcast(publicSnapshot);
     }
 
     public void TickClient(DirectConnectClient client, int localCompanySlot, string localPlayerName)
@@ -65,18 +72,120 @@ public sealed class CompanyStateSyncService
             return;
         }
 
-        HandleIncomingSnapshot(snapshot);
-        client.Send(CreatePublicSnapshot(snapshot));
+        var publicSnapshot = CreateOutgoingPublicSnapshot(snapshot, hostAuthoritative: false, fullSnapshot: false);
+        HandleIncomingSnapshot(publicSnapshot);
+        client.Send(publicSnapshot);
     }
 
     public void HandleIncomingSnapshot(CompanyStateSnapshotMessage snapshot)
     {
+        snapshot = MergeIncomingSnapshot(snapshot);
+        var diagnostics = GetDiagnostics(snapshot.CompanySlot);
+        var receivedTicks = DateTime.UtcNow.Ticks;
+        if (snapshot.SentUtcTicks <= 0)
+        {
+            snapshot.SentUtcTicks = receivedTicks;
+        }
+
+        var incomingFingerprint = snapshot.SnapshotFingerprint;
+        StampObjectFingerprints(snapshot);
+        var computedFingerprint = ComputeSnapshotFingerprint(snapshot);
+        if (string.IsNullOrWhiteSpace(incomingFingerprint))
+        {
+            snapshot.SnapshotFingerprint = computedFingerprint;
+        }
+        else if (!string.Equals(incomingFingerprint, computedFingerprint, StringComparison.Ordinal))
+        {
+            diagnostics.ChecksumMismatches++;
+            diagnostics.NeedsResync = true;
+            diagnostics.LastReason = "Snapshot fingerprint mismatch.";
+            snapshot.SnapshotFingerprint = computedFingerprint;
+        }
+
+        if (!snapshot.FullSnapshot && snapshot.Sequence > 0 && diagnostics.LastSequence > 0)
+        {
+            if (snapshot.Sequence <= diagnostics.LastSequence)
+            {
+                diagnostics.StaleSnapshots++;
+                diagnostics.LastReceivedUtcTicks = receivedTicks;
+                diagnostics.LastReason = $"Ignored stale sequence {snapshot.Sequence}.";
+                return;
+            }
+
+            if (snapshot.Sequence > diagnostics.LastSequence + 1)
+            {
+                diagnostics.MissedSnapshots += snapshot.Sequence - diagnostics.LastSequence - 1;
+                diagnostics.NeedsResync = true;
+                diagnostics.LastReason = $"Missed sequence {diagnostics.LastSequence + 1}.";
+            }
+        }
+
+        if (snapshot.FullSnapshot)
+        {
+            diagnostics.NeedsResync = false;
+            diagnostics.LastReason = "Full snapshot received.";
+        }
+
         _latestSnapshots[snapshot.CompanySlot] = snapshot;
+        diagnostics.CompanySlot = snapshot.CompanySlot;
+        diagnostics.LastSequence = Math.Max(diagnostics.LastSequence, snapshot.Sequence);
+        diagnostics.LastReceivedUtcTicks = receivedTicks;
+        diagnostics.LastSnapshotSentUtcTicks = snapshot.SentUtcTicks;
+        diagnostics.LastFingerprint = snapshot.SnapshotFingerprint;
+        diagnostics.LastObjectCount = snapshot.OwnedInventories.Count;
+        diagnostics.LastFacilityTypeCount = snapshot.OwnedInventories.Sum(inventory => inventory.Facilities.Count);
+        diagnostics.HostAuthoritative = snapshot.HostAuthoritative;
+        diagnostics.LastSnapshotWasFull = snapshot.FullSnapshot;
     }
 
     public CompanyStateSnapshotMessage? CaptureForcedLocalSnapshot(int localCompanySlot, string localPlayerName)
     {
         return CaptureLocalSnapshot(localCompanySlot, localPlayerName, force: true);
+    }
+
+    public CompanyStateSnapshotMessage? CaptureForcedPublicSnapshot(int localCompanySlot, string localPlayerName, bool hostAuthoritative, bool fullSnapshot)
+    {
+        var snapshot = CaptureLocalSnapshot(localCompanySlot, localPlayerName, force: true);
+        return snapshot == null
+            ? null
+            : CreateOutgoingPublicSnapshot(snapshot, hostAuthoritative, fullSnapshot);
+    }
+
+    public CompanyStateSnapshotMessage CreateOutgoingPublicSnapshot(CompanyStateSnapshotMessage snapshot, bool hostAuthoritative, bool fullSnapshot)
+    {
+        var publicSnapshot = CreatePublicSnapshot(snapshot);
+        publicSnapshot.HostAuthoritative = hostAuthoritative;
+        publicSnapshot.FullSnapshot = fullSnapshot;
+        publicSnapshot.SentUtcTicks = DateTime.UtcNow.Ticks;
+        StampFingerprints(publicSnapshot);
+        if (!fullSnapshot)
+        {
+            ApplyDirtyInventoryFilter(publicSnapshot);
+        }
+        else
+        {
+            RememberSentObjectFingerprints(publicSnapshot);
+        }
+
+        publicSnapshot.Sequence = NextSequence(publicSnapshot.CompanySlot);
+        return publicSnapshot;
+    }
+
+    public void MarkResyncRequested(int companySlot, string reason)
+    {
+        var diagnostics = GetDiagnostics(companySlot);
+        diagnostics.NeedsResync = false;
+        diagnostics.LastResyncRequestUtcTicks = DateTime.UtcNow.Ticks;
+        diagnostics.LastReason = reason;
+    }
+
+    public IReadOnlyList<int> GetSlotsNeedingResync(int localCompanySlot)
+    {
+        return _snapshotDiagnostics.Values
+            .Where(x => x.CompanySlot != localCompanySlot && x.NeedsResync)
+            .OrderBy(x => x.CompanySlot)
+            .Select(x => x.CompanySlot)
+            .ToArray();
     }
 
     public static CompanyStateSnapshotMessage CreatePublicSnapshot(CompanyStateSnapshotMessage snapshot)
@@ -133,8 +242,11 @@ public sealed class CompanyStateSyncService
                 ClearRemoteCompanyPrivateState(company);
             }
 
-            var fingerprint = JsonConvert.SerializeObject(snapshot);
-            if (_lastAppliedFingerprints.TryGetValue(snapshot.CompanySlot, out var lastFingerprint) &&
+            var fingerprint = string.IsNullOrWhiteSpace(snapshot.SnapshotFingerprint)
+                ? ComputeSnapshotFingerprint(snapshot)
+                : snapshot.SnapshotFingerprint;
+            if (!snapshot.FullSnapshot &&
+                _lastAppliedFingerprints.TryGetValue(snapshot.CompanySlot, out var lastFingerprint) &&
                 string.Equals(lastFingerprint, fingerprint, StringComparison.Ordinal))
             {
                 continue;
@@ -146,6 +258,11 @@ public sealed class CompanyStateSyncService
             }
 
             ApplyInventoryState(company, snapshot);
+            if (_snapshotDiagnostics.TryGetValue(snapshot.CompanySlot, out var diagnostics))
+            {
+                diagnostics.LastAppliedUtcTicks = DateTime.UtcNow.Ticks;
+            }
+
             _lastAppliedFingerprints[snapshot.CompanySlot] = fingerprint;
         }
 
@@ -169,6 +286,105 @@ public sealed class CompanyStateSyncService
 
         _nextSendAt = UnityEngine.Time.unscaledTime + 1f;
         return true;
+    }
+
+    private long NextSequence(int companySlot)
+    {
+        if (!_nextSequences.TryGetValue(companySlot, out var sequence))
+        {
+            sequence = 0;
+        }
+
+        if (_snapshotDiagnostics.TryGetValue(companySlot, out var diagnostics))
+        {
+            sequence = Math.Max(sequence, diagnostics.LastSequence);
+        }
+
+        sequence++;
+        _nextSequences[companySlot] = sequence;
+        return sequence;
+    }
+
+    private CompanySnapshotDiagnostics GetDiagnostics(int companySlot)
+    {
+        if (!_snapshotDiagnostics.TryGetValue(companySlot, out var diagnostics))
+        {
+            diagnostics = new CompanySnapshotDiagnostics { CompanySlot = companySlot };
+            _snapshotDiagnostics[companySlot] = diagnostics;
+        }
+
+        return diagnostics;
+    }
+
+    private CompanyStateSnapshotMessage MergeIncomingSnapshot(CompanyStateSnapshotMessage incoming)
+    {
+        if (incoming.FullSnapshot || !_latestSnapshots.TryGetValue(incoming.CompanySlot, out var previous))
+        {
+            return incoming;
+        }
+
+        var mergedInventories = previous.OwnedInventories
+            .Where(x => x != null)
+            .ToDictionary(x => x.ObjectId, x => CloneInventory(x));
+
+        foreach (var inventory in incoming.OwnedInventories.Where(x => x != null))
+        {
+            if (inventory.Facilities.Count == 0)
+            {
+                mergedInventories.Remove(inventory.ObjectId);
+                continue;
+            }
+
+            mergedInventories[inventory.ObjectId] = CloneInventory(inventory);
+        }
+
+        return new CompanyStateSnapshotMessage
+        {
+            MessageType = nameof(CompanyStateSnapshotMessage),
+            Sequence = incoming.Sequence,
+            SentUtcTicks = incoming.SentUtcTicks,
+            FullSnapshot = false,
+            HostAuthoritative = incoming.HostAuthoritative,
+            SnapshotFingerprint = incoming.SnapshotFingerprint,
+            CompanySlot = incoming.CompanySlot,
+            CompanyId = incoming.CompanyId,
+            CompanyName = incoming.CompanyName,
+            OwnerPlayerName = incoming.OwnerPlayerName,
+            Money = incoming.Money,
+            TotalProfit = incoming.TotalProfit,
+            DiscoveredSystemsCount = incoming.DiscoveredSystemsCount,
+            CompletedResearchCount = incoming.CompletedResearchCount,
+            CompletedResearchIds = incoming.CompletedResearchIds ?? new List<string>(),
+            ActiveResearch = incoming.ActiveResearch ?? new List<ResearchProgressDto>(),
+            OwnedInventories = mergedInventories.Values.OrderBy(x => x.ObjectId).ToList()
+        };
+    }
+
+    private static ObjectInventorySnapshotDto CloneInventory(ObjectInventorySnapshotDto inventory)
+    {
+        return new ObjectInventorySnapshotDto
+        {
+            ObjectId = inventory.ObjectId,
+            ObjectName = inventory.ObjectName,
+            ObjectFingerprint = inventory.ObjectFingerprint,
+            ConstructionEquipmentCount = inventory.ConstructionEquipmentCount,
+            Resources = inventory.Resources?.Select(x => new ResourceStackDto
+            {
+                ResourceId = x.ResourceId,
+                Value = x.Value,
+                ResourceState = x.ResourceState,
+                ForcePrimary = x.ForcePrimary,
+                MiningFactor = x.MiningFactor
+            }).ToList() ?? new List<ResourceStackDto>(),
+            Facilities = inventory.Facilities?.Select(x => new FacilitySnapshotDto
+            {
+                DescriptorId = x.DescriptorId,
+                Quantity = x.Quantity,
+                Enabled = x.Enabled,
+                HaveWorkers = x.HaveWorkers,
+                ValidCanAddFacility = x.ValidCanAddFacility
+            }).ToList() ?? new List<FacilitySnapshotDto>()
+        };
     }
 
     private CompanyStateSnapshotMessage? CaptureLocalSnapshot(int localCompanySlot, string localPlayerName, bool force)
@@ -195,13 +411,15 @@ public sealed class CompanyStateSyncService
         PopulateResearch(snapshot, company);
         PopulateInventories(snapshot, company);
 
-        var fingerprint = JsonConvert.SerializeObject(snapshot);
-        if (!force && string.Equals(_lastSentFingerprint, fingerprint, StringComparison.Ordinal))
+        var publicSnapshot = CreatePublicSnapshot(snapshot);
+        StampFingerprints(publicSnapshot);
+        var fingerprint = publicSnapshot.SnapshotFingerprint;
+        if (!force && string.Equals(_lastSentPublicFingerprint, fingerprint, StringComparison.Ordinal))
         {
             return null;
         }
 
-        _lastSentFingerprint = fingerprint;
+        _lastSentPublicFingerprint = fingerprint;
         return snapshot;
     }
 
@@ -470,4 +688,165 @@ public sealed class CompanyStateSyncService
         }
     }
 
+    private static void StampFingerprints(CompanyStateSnapshotMessage snapshot)
+    {
+        StampObjectFingerprints(snapshot);
+        snapshot.SnapshotFingerprint = ComputeSnapshotFingerprint(snapshot);
+    }
+
+    private void ApplyDirtyInventoryFilter(CompanyStateSnapshotMessage snapshot)
+    {
+        var current = snapshot.OwnedInventories
+            .Where(x => x != null)
+            .ToDictionary(x => x.ObjectId, x => x.ObjectFingerprint);
+
+        if (!_lastSentObjectFingerprints.TryGetValue(snapshot.CompanySlot, out var previous))
+        {
+            previous = new Dictionary<int, string>();
+            _lastSentObjectFingerprints[snapshot.CompanySlot] = previous;
+        }
+
+        var changedObjectIds = new HashSet<int>();
+        foreach (var pair in current)
+        {
+            if (!previous.TryGetValue(pair.Key, out var lastFingerprint) ||
+                !string.Equals(lastFingerprint, pair.Value, StringComparison.Ordinal))
+            {
+                changedObjectIds.Add(pair.Key);
+            }
+        }
+
+        var removedObjectIds = previous.Keys
+            .Where(objectId => !current.ContainsKey(objectId))
+            .ToArray();
+
+        snapshot.OwnedInventories = snapshot.OwnedInventories
+            .Where(x => changedObjectIds.Contains(x.ObjectId))
+            .Select(CloneInventory)
+            .ToList();
+
+        foreach (var removedObjectId in removedObjectIds)
+        {
+            var tombstone = new ObjectInventorySnapshotDto
+            {
+                ObjectId = removedObjectId,
+                ObjectName = $"Object {removedObjectId}",
+                Facilities = new List<FacilitySnapshotDto>()
+            };
+            tombstone.ObjectFingerprint = ComputeInventoryFingerprint(tombstone);
+            snapshot.OwnedInventories.Add(tombstone);
+        }
+
+        RememberSentObjectFingerprints(snapshot.CompanySlot, current);
+    }
+
+    private void RememberSentObjectFingerprints(CompanyStateSnapshotMessage snapshot)
+    {
+        RememberSentObjectFingerprints(
+            snapshot.CompanySlot,
+            snapshot.OwnedInventories
+                .Where(x => x != null)
+                .ToDictionary(x => x.ObjectId, x => x.ObjectFingerprint));
+    }
+
+    private void RememberSentObjectFingerprints(int companySlot, Dictionary<int, string> current)
+    {
+        _lastSentObjectFingerprints[companySlot] = new Dictionary<int, string>(current);
+    }
+
+    private static void StampObjectFingerprints(CompanyStateSnapshotMessage snapshot)
+    {
+        foreach (var inventory in snapshot.OwnedInventories)
+        {
+            inventory.ObjectFingerprint = ComputeInventoryFingerprint(inventory);
+        }
+    }
+
+    private static string ComputeSnapshotFingerprint(CompanyStateSnapshotMessage snapshot)
+    {
+        StampObjectFingerprints(snapshot);
+        var canonical = new
+        {
+            snapshot.CompanySlot,
+            snapshot.CompanyId,
+            snapshot.CompanyName,
+            snapshot.OwnerPlayerName,
+            Money = Math.Round(snapshot.Money, 2),
+            Objects = snapshot.OwnedInventories
+                .OrderBy(x => x.ObjectId)
+                .Select(x => new
+                {
+                    x.ObjectId,
+                    x.ObjectName,
+                    x.ObjectFingerprint
+                })
+                .ToArray()
+        };
+
+        return Sha256(JsonConvert.SerializeObject(canonical));
+    }
+
+    private static string ComputeInventoryFingerprint(ObjectInventorySnapshotDto inventory)
+    {
+        var canonical = new
+        {
+            inventory.ObjectId,
+            inventory.ObjectName,
+            Facilities = inventory.Facilities
+                .OrderBy(x => x.DescriptorId)
+                .Select(x => new
+                {
+                    x.DescriptorId,
+                    x.Quantity,
+                    x.Enabled,
+                    x.HaveWorkers,
+                    x.ValidCanAddFacility
+                })
+                .ToArray()
+        };
+
+        return Sha256(JsonConvert.SerializeObject(canonical));
+    }
+
+    private static string Sha256(string value)
+    {
+        using (var sha = SHA256.Create())
+        {
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+            return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
+        }
+    }
+}
+
+public sealed class CompanySnapshotDiagnostics
+{
+    public int CompanySlot { get; set; }
+    public long LastSequence { get; set; }
+    public long LastReceivedUtcTicks { get; set; }
+    public long LastAppliedUtcTicks { get; set; }
+    public long LastSnapshotSentUtcTicks { get; set; }
+    public long LastResyncRequestUtcTicks { get; set; }
+    public string LastFingerprint { get; set; } = string.Empty;
+    public long MissedSnapshots { get; set; }
+    public long StaleSnapshots { get; set; }
+    public long ChecksumMismatches { get; set; }
+    public bool NeedsResync { get; set; }
+    public bool HostAuthoritative { get; set; }
+    public bool LastSnapshotWasFull { get; set; }
+    public int LastObjectCount { get; set; }
+    public int LastFacilityTypeCount { get; set; }
+    public string LastReason { get; set; } = string.Empty;
+
+    public double AgeSeconds
+    {
+        get
+        {
+            if (LastReceivedUtcTicks <= 0)
+            {
+                return double.PositiveInfinity;
+            }
+
+            return Math.Max(0, (DateTime.UtcNow.Ticks - LastReceivedUtcTicks) / (double)TimeSpan.TicksPerSecond);
+        }
+    }
 }

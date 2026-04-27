@@ -85,6 +85,26 @@ public sealed class CompanyActionResultMessage : NetMessage
     public string Reason { get; set; } = string.Empty;
 }
 
+public sealed class SyncResyncRequestMessage : NetMessage
+{
+    public Guid RequestId { get; set; }
+    public int RequestedCompanySlot { get; set; } = -1;
+    public string Reason { get; set; } = string.Empty;
+    public long SentUtcTicks { get; set; }
+}
+
+public sealed class PublicCompanyEventMessage : NetMessage
+{
+    public Guid EventId { get; set; }
+    public int CompanySlot { get; set; }
+    public string PlayerName { get; set; } = string.Empty;
+    public string CompanyName { get; set; } = string.Empty;
+    public string EventType { get; set; } = string.Empty;
+    public string Summary { get; set; } = string.Empty;
+    public long SentUtcTicks { get; set; }
+    public Dictionary<string, string> Data { get; set; } = new Dictionary<string, string>();
+}
+
 public sealed class ChatMessage : NetMessage
 {
     public Guid MessageId { get; set; }
@@ -107,6 +127,11 @@ public sealed class PlayerPresenceDto
 
 public sealed class CompanyStateSnapshotMessage : NetMessage
 {
+    public long Sequence { get; set; }
+    public long SentUtcTicks { get; set; }
+    public bool FullSnapshot { get; set; }
+    public bool HostAuthoritative { get; set; }
+    public string SnapshotFingerprint { get; set; } = string.Empty;
     public int CompanySlot { get; set; }
     public string CompanyId { get; set; } = string.Empty;
     public string CompanyName { get; set; } = string.Empty;
@@ -131,6 +156,7 @@ public sealed class ObjectInventorySnapshotDto
 {
     public int ObjectId { get; set; }
     public string ObjectName { get; set; } = string.Empty;
+    public string ObjectFingerprint { get; set; } = string.Empty;
     public long ConstructionEquipmentCount { get; set; }
     public List<ResourceStackDto> Resources { get; set; } = new List<ResourceStackDto>();
     public List<FacilitySnapshotDto> Facilities { get; set; } = new List<FacilitySnapshotDto>();

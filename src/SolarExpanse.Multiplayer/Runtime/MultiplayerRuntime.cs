@@ -27,15 +27,18 @@ public sealed class MultiplayerRuntime : IDisposable
     private readonly ConcurrentQueue<float> _pendingTimeScaleRequests = new ConcurrentQueue<float>();
     private readonly object _startGameLock = new object();
     private readonly object _chatLock = new object();
+    private readonly object _publicEventsLock = new object();
     private readonly List<ChatMessage> _chatMessages = new List<ChatMessage>();
+    private readonly List<PublicCompanyEventMessage> _publicEvents = new List<PublicCompanyEventMessage>();
     private PlayerPresenceMessage _latestPresence = new PlayerPresenceMessage();
     private StartGameMessage? _pendingStartGame;
     private Guid _activeStartSessionId = Guid.Empty;
     private bool _sharedSessionStarted;
     private bool _gameReadySent;
+    private float _nextAutoResyncAt;
 
     private readonly Rect _windowRect = new Rect(20f, 20f, 430f, 360f);
-    private Rect _multiplayerWindowRect = new Rect(20f, 390f, 560f, 430f);
+    private Rect _multiplayerWindowRect = new Rect(20f, 390f, 640f, 560f);
     private Vector2 _playersScroll;
     private Vector2 _chatScroll;
 
@@ -99,10 +102,17 @@ public sealed class MultiplayerRuntime : IDisposable
         _host.GameReadyReceived += OnGameReadyReceived;
         _host.CompanyActionCommandReceived += OnCompanyActionCommandReceived;
         _host.ChatMessageReceived += OnHostChatMessageReceived;
+        _host.ResyncRequested += OnResyncRequested;
         _client.Joined += OnJoined;
         _client.TimeSnapshotReceived += snapshot => _timeSyncService.QueueSnapshot(snapshot);
         _client.CompanyStateReceived += snapshot =>
         {
+            if (!snapshot.HostAuthoritative && snapshot.CompanySlot != _companyOwnershipService.LocalCompanySlot)
+            {
+                RequestResync(snapshot.CompanySlot, "Ignored non-authoritative remote snapshot.");
+                return;
+            }
+
             _companyStateSyncService.HandleIncomingSnapshot(snapshot);
             if (!string.IsNullOrWhiteSpace(snapshot.CompanyName))
             {
@@ -111,6 +121,7 @@ public sealed class MultiplayerRuntime : IDisposable
         };
         _client.CompanyActionResultReceived += OnCompanyActionResultReceived;
         _client.ChatMessageReceived += AddChatMessage;
+        _client.PublicCompanyEventReceived += AddPublicCompanyEvent;
         _client.PresenceUpdated += presence =>
         {
             _latestPresence = presence;
@@ -158,6 +169,7 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         _companyStateSyncService.ApplyRemoteSnapshots(_companyOwnershipService.LocalCompanySlot);
+        TryAutoRequestResync();
         TrySendGameReady();
     }
 
@@ -313,6 +325,12 @@ public sealed class MultiplayerRuntime : IDisposable
         if (_host.IsRunning)
         {
             _log.LogInfo($"Host local company action recorded: {actionType}.");
+            TryBroadcastPublicCompanyEventForAction(
+                _companyOwnershipService.LocalCompanySlot,
+                _playerNameInput,
+                _companyNameInput,
+                actionType,
+                arguments);
             return true;
         }
 
@@ -328,6 +346,17 @@ public sealed class MultiplayerRuntime : IDisposable
     }
 
     public bool RecordPrivateCompanyActionForCompany(global::Game.Company? company, string actionType, IReadOnlyDictionary<string, string> arguments)
+    {
+        if (!_companyOwnershipService.TryGetSlotForCompany(company, out var companySlot) ||
+            companySlot != _companyOwnershipService.LocalCompanySlot)
+        {
+            return false;
+        }
+
+        return SendPrivateCompanyAction(actionType, arguments);
+    }
+
+    public bool RecordPublicCompanyEventForCompany(global::Game.Company? company, string actionType, IReadOnlyDictionary<string, string> arguments)
     {
         if (!_companyOwnershipService.TryGetSlotForCompany(company, out var companySlot) ||
             companySlot != _companyOwnershipService.LocalCompanySlot)
@@ -661,6 +690,12 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         _log.LogInfo($"Accepted private company action '{command.ActionType}' from {peer.PlayerName} for company slot {peer.AssignedCompanySlot}.");
+        TryBroadcastPublicCompanyEventForAction(
+            peer.AssignedCompanySlot,
+            peer.PlayerName,
+            peer.CompanyName,
+            command.ActionType,
+            command.Arguments);
     }
 
     private CompanyActionResultMessage ValidateCompanyAction(HostPeerState peer, CompanyActionCommandMessage command)
@@ -798,21 +833,188 @@ public sealed class MultiplayerRuntime : IDisposable
         }
     }
 
+    private void OnResyncRequested(HostPeerState peer, SyncResyncRequestMessage request)
+    {
+        SendKnownSnapshotsToPeer(peer, request.RequestedCompanySlot, forceFull: true);
+        _status = $"Sent full resync to {peer.PlayerName}: {request.Reason}";
+    }
+
+    private void RequestResync(int requestedCompanySlot, string reason)
+    {
+        if (_host.IsRunning)
+        {
+            foreach (var peer in _host.Peers)
+            {
+                SendKnownSnapshotsToPeer(peer, requestedCompanySlot, forceFull: true);
+            }
+
+            _status = "Host resent full public state.";
+            return;
+        }
+
+        if (!_client.IsConnected)
+        {
+            _status = "Cannot request resync while disconnected.";
+            return;
+        }
+
+        _client.Send(new SyncResyncRequestMessage
+        {
+            MessageType = nameof(SyncResyncRequestMessage),
+            RequestId = Guid.NewGuid(),
+            RequestedCompanySlot = requestedCompanySlot,
+            Reason = reason,
+            SentUtcTicks = DateTime.UtcNow.Ticks
+        });
+
+        if (requestedCompanySlot >= 0)
+        {
+            _companyStateSyncService.MarkResyncRequested(requestedCompanySlot, reason);
+        }
+
+        _status = "Requested full public-state resync from host.";
+    }
+
+    private void TryAutoRequestResync()
+    {
+        if (!_client.IsConnected || UnityEngine.Time.unscaledTime < _nextAutoResyncAt)
+        {
+            return;
+        }
+
+        var slots = _companyStateSyncService.GetSlotsNeedingResync(_companyOwnershipService.LocalCompanySlot);
+        if (slots.Count == 0)
+        {
+            return;
+        }
+
+        _nextAutoResyncAt = UnityEngine.Time.unscaledTime + 5f;
+        RequestResync(slots[0], "Automatic repair after sequence/fingerprint mismatch.");
+    }
+
+    private void TryBroadcastPublicCompanyEventForAction(int companySlot, string playerName, string companyName, string actionType, IReadOnlyDictionary<string, string> arguments)
+    {
+        if (!IsPublicCompanyEvent(actionType))
+        {
+            return;
+        }
+
+        var eventMessage = new PublicCompanyEventMessage
+        {
+            MessageType = nameof(PublicCompanyEventMessage),
+            EventId = Guid.NewGuid(),
+            CompanySlot = companySlot,
+            PlayerName = string.IsNullOrWhiteSpace(playerName) ? "Player" : playerName,
+            CompanyName = string.IsNullOrWhiteSpace(companyName) ? $"Company {companySlot}" : companyName,
+            EventType = actionType,
+            Summary = BuildPublicEventSummary(companyName, actionType, arguments),
+            SentUtcTicks = DateTime.UtcNow.Ticks,
+            Data = arguments.ToDictionary(x => x.Key, x => x.Value)
+        };
+
+        AddPublicCompanyEvent(eventMessage);
+        if (_host.IsRunning)
+        {
+            _host.Broadcast(eventMessage);
+        }
+    }
+
+    private static bool IsPublicCompanyEvent(string actionType)
+    {
+        return string.Equals(actionType, "CompleteProduction", StringComparison.OrdinalIgnoreCase) ||
+               actionType.IndexOf("Launch", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               actionType.IndexOf("Arrive", StringComparison.OrdinalIgnoreCase) >= 0 ||
+               actionType.IndexOf("Visible", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string BuildPublicEventSummary(string companyName, string actionType, IReadOnlyDictionary<string, string> arguments)
+    {
+        var name = string.IsNullOrWhiteSpace(companyName) ? "A company" : companyName.Trim();
+        arguments.TryGetValue("ProductionItemTypeId", out var itemType);
+        arguments.TryGetValue("ObjectName", out var objectName);
+
+        if (string.Equals(actionType, "CompleteProduction", StringComparison.OrdinalIgnoreCase))
+        {
+            var item = string.IsNullOrWhiteSpace(itemType) ? "a build" : itemType;
+            return string.IsNullOrWhiteSpace(objectName)
+                ? $"{name} completed {item}."
+                : $"{name} completed {item} at {objectName}.";
+        }
+
+        arguments.TryGetValue("SpacecraftName", out var spacecraftName);
+        arguments.TryGetValue("MissionTarget", out var missionTarget);
+        if (string.Equals(actionType, "SpacecraftLaunch", StringComparison.OrdinalIgnoreCase))
+        {
+            var craft = string.IsNullOrWhiteSpace(spacecraftName) ? "a spacecraft" : spacecraftName;
+            return string.IsNullOrWhiteSpace(missionTarget)
+                ? $"{name} launched {craft}."
+                : $"{name} launched {craft} toward {missionTarget}.";
+        }
+
+        if (string.Equals(actionType, "SpacecraftArrive", StringComparison.OrdinalIgnoreCase))
+        {
+            var craft = string.IsNullOrWhiteSpace(spacecraftName) ? "a spacecraft" : spacecraftName;
+            return string.IsNullOrWhiteSpace(missionTarget)
+                ? $"{name} has a spacecraft arriving."
+                : $"{name}'s {craft} is arriving at {missionTarget}.";
+        }
+
+        return $"{name}: {actionType}.";
+    }
+
+    private void AddPublicCompanyEvent(PublicCompanyEventMessage eventMessage)
+    {
+        if (eventMessage.EventId == Guid.Empty)
+        {
+            eventMessage.EventId = Guid.NewGuid();
+        }
+
+        if (eventMessage.SentUtcTicks <= 0)
+        {
+            eventMessage.SentUtcTicks = DateTime.UtcNow.Ticks;
+        }
+
+        lock (_publicEventsLock)
+        {
+            if (_publicEvents.Any(x => x.EventId == eventMessage.EventId))
+            {
+                return;
+            }
+
+            _publicEvents.Add(eventMessage);
+            if (_publicEvents.Count > 100)
+            {
+                _publicEvents.RemoveRange(0, _publicEvents.Count - 100);
+            }
+        }
+    }
+
+    private PublicCompanyEventMessage[] GetPublicEventsSnapshot()
+    {
+        lock (_publicEventsLock)
+        {
+            return _publicEvents.ToArray();
+        }
+    }
+
     private void SendKnownSnapshotsToAllPeers()
     {
         foreach (var peer in _host.Peers)
         {
-            SendKnownSnapshotsToPeer(peer);
+            SendKnownSnapshotsToPeer(peer, requestedCompanySlot: -1, forceFull: true);
         }
     }
 
-    private void SendKnownSnapshotsToPeer(HostPeerState peer)
+    private void SendKnownSnapshotsToPeer(HostPeerState peer, int requestedCompanySlot = -1, bool forceFull = true)
     {
-        var localSnapshot = _companyStateSyncService.CaptureForcedLocalSnapshot(_companyOwnershipService.LocalCompanySlot, _playerNameInput);
+        var localSnapshot = _companyStateSyncService.CaptureForcedPublicSnapshot(_companyOwnershipService.LocalCompanySlot, _playerNameInput, hostAuthoritative: true, fullSnapshot: forceFull);
         if (localSnapshot != null)
         {
             _companyStateSyncService.HandleIncomingSnapshot(localSnapshot);
-            _host.Send(peer, CompanyStateSyncService.CreatePublicSnapshot(localSnapshot));
+            if (requestedCompanySlot < 0 || requestedCompanySlot == localSnapshot.CompanySlot)
+            {
+                _host.Send(peer, localSnapshot);
+            }
         }
 
         foreach (var snapshot in _companyStateSyncService.LatestSnapshots.Values.OrderBy(x => x.CompanySlot))
@@ -827,7 +1029,12 @@ public sealed class MultiplayerRuntime : IDisposable
                 continue;
             }
 
-            _host.Send(peer, CompanyStateSyncService.CreatePublicSnapshot(snapshot));
+            if (requestedCompanySlot >= 0 && requestedCompanySlot != snapshot.CompanySlot)
+            {
+                continue;
+            }
+
+            _host.Send(peer, _companyStateSyncService.CreateOutgoingPublicSnapshot(snapshot, hostAuthoritative: true, fullSnapshot: forceFull));
         }
     }
 
@@ -850,6 +1057,10 @@ public sealed class MultiplayerRuntime : IDisposable
         var normalized = new CompanyStateSnapshotMessage
         {
             MessageType = nameof(CompanyStateSnapshotMessage),
+            Sequence = 0,
+            SentUtcTicks = snapshot.SentUtcTicks,
+            FullSnapshot = snapshot.FullSnapshot,
+            HostAuthoritative = false,
             CompanySlot = peer.AssignedCompanySlot,
             CompanyId = normalizedCompanyId,
             CompanyName = normalizedCompanyName,
@@ -863,11 +1074,15 @@ public sealed class MultiplayerRuntime : IDisposable
             OwnedInventories = snapshot.OwnedInventories ?? new System.Collections.Generic.List<ObjectInventorySnapshotDto>()
         };
 
-        var publicSnapshot = CompanyStateSyncService.CreatePublicSnapshot(normalized);
+        _companyStateSyncService.HandleIncomingSnapshot(normalized);
+        var latest = _companyStateSyncService.LatestSnapshots.TryGetValue(peer.AssignedCompanySlot, out var latestSnapshot)
+            ? latestSnapshot
+            : normalized;
+        var publicSnapshot = _companyStateSyncService.CreateOutgoingPublicSnapshot(latest, hostAuthoritative: true, fullSnapshot: snapshot.FullSnapshot);
         _companyOwnershipService.SetCompanyDisplayName(peer.AssignedCompanySlot, normalizedCompanyName);
         RefreshCompanyDisplayNames();
         _companyStateSyncService.HandleIncomingSnapshot(publicSnapshot);
-        _host.BroadcastExcept(peer.SessionId, publicSnapshot);
+        _host.Broadcast(publicSnapshot);
     }
 
     private void RefreshCompanyDisplayNames()
@@ -909,6 +1124,14 @@ public sealed class MultiplayerRuntime : IDisposable
         var rows = BuildPlayerStatusRows();
         GUILayout.Label(GetConnectionStatusText());
         GUILayout.Label(GetSyncStatusText(rows));
+        GUILayout.BeginHorizontal();
+        if (GUILayout.Button("Request Resync", GUILayout.Width(130f)))
+        {
+            RequestResync(-1, "Manual resync requested from multiplayer window.");
+        }
+
+        GUILayout.Label("Full public-state catch-up from host", GUILayout.ExpandWidth(true));
+        GUILayout.EndHorizontal();
         GUILayout.Space(6f);
 
         GUILayout.Label("Connected Players");
@@ -919,7 +1142,7 @@ public sealed class MultiplayerRuntime : IDisposable
         GUILayout.Label("Sync", GUILayout.ExpandWidth(true));
         GUILayout.EndHorizontal();
 
-        _playersScroll = GUILayout.BeginScrollView(_playersScroll, GUILayout.Height(110f));
+        _playersScroll = GUILayout.BeginScrollView(_playersScroll, GUILayout.Height(95f));
         foreach (var row in rows)
         {
             GUILayout.BeginHorizontal();
@@ -932,8 +1155,25 @@ public sealed class MultiplayerRuntime : IDisposable
         GUILayout.EndScrollView();
 
         GUILayout.Space(6f);
+        GUILayout.Label("Sync Diagnostics");
+        foreach (var diagnostics in _companyStateSyncService.SnapshotDiagnostics.Values.OrderBy(x => x.CompanySlot).Take(5))
+        {
+            GUILayout.Label($"Company {diagnostics.CompanySlot}: seq {diagnostics.LastSequence}, age {FormatAge(diagnostics.AgeSeconds)}, missed {diagnostics.MissedSnapshots}, stale {diagnostics.StaleSnapshots}, checksum {diagnostics.ChecksumMismatches}, {(diagnostics.HostAuthoritative ? "host" : "local")}, {(diagnostics.NeedsResync ? "needs resync" : "caught up")}");
+        }
+
+        GUILayout.Space(6f);
+        GUILayout.Label("Public Events");
+        foreach (var publicEvent in GetPublicEventsSnapshot().Reverse().Take(4).Reverse())
+        {
+            var sent = publicEvent.SentUtcTicks > 0
+                ? new DateTime(publicEvent.SentUtcTicks, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
+                : "--:--";
+            GUILayout.Label($"[{sent}] {publicEvent.Summary}");
+        }
+
+        GUILayout.Space(6f);
         GUILayout.Label("Chat");
-        _chatScroll = GUILayout.BeginScrollView(_chatScroll, GUILayout.Height(150f));
+        _chatScroll = GUILayout.BeginScrollView(_chatScroll, GUILayout.Height(130f));
         foreach (var message in GetChatMessagesSnapshot())
         {
             var sent = message.SentUtcTicks > 0
@@ -1125,6 +1365,18 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         return "$" + money.ToString("N0", CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatAge(double seconds)
+    {
+        if (double.IsInfinity(seconds) || double.IsNaN(seconds))
+        {
+            return "never";
+        }
+
+        return seconds < 60
+            ? $"{seconds:0.0}s"
+            : $"{seconds / 60:0.0}m";
     }
 
     private ChatMessage[] GetChatMessagesSnapshot()

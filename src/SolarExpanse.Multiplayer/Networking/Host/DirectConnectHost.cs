@@ -33,6 +33,7 @@ public sealed class DirectConnectHost : IDisposable
     public event Action<HostPeerState, GameReadyMessage>? GameReadyReceived;
     public event Action<HostPeerState, CompanyActionCommandMessage>? CompanyActionCommandReceived;
     public event Action<HostPeerState, ChatMessage>? ChatMessageReceived;
+    public event Action<HostPeerState, SyncResyncRequestMessage>? ResyncRequested;
 
     public bool IsRunning => _listener != null;
     public int BoundPort { get; private set; }
@@ -288,6 +289,10 @@ public sealed class DirectConnectHost : IDisposable
                     else if (message is ChatMessage chatMessage)
                     {
                         ChatMessageReceived?.Invoke(peer, chatMessage);
+                    }
+                    else if (message is SyncResyncRequestMessage resyncRequest)
+                    {
+                        ResyncRequested?.Invoke(peer, resyncRequest);
                     }
                     else if (message is CompanyStateSnapshotMessage companyStateSnapshot)
                     {
