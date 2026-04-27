@@ -30,6 +30,8 @@ public static class JsonMessageSerializer
             nameof(CompanyActionResultMessage) => obj.ToObject<CompanyActionResultMessage>() ?? throw new InvalidOperationException("Invalid CompanyActionResultMessage payload."),
             nameof(SyncResyncRequestMessage) => obj.ToObject<SyncResyncRequestMessage>() ?? throw new InvalidOperationException("Invalid SyncResyncRequestMessage payload."),
             nameof(PublicCompanyEventMessage) => obj.ToObject<PublicCompanyEventMessage>() ?? throw new InvalidOperationException("Invalid PublicCompanyEventMessage payload."),
+            nameof(TradeOfferSyncMessage) => obj.ToObject<TradeOfferSyncMessage>() ?? throw new InvalidOperationException("Invalid TradeOfferSyncMessage payload."),
+            nameof(TradeOfferFulfillMessage) => obj.ToObject<TradeOfferFulfillMessage>() ?? throw new InvalidOperationException("Invalid TradeOfferFulfillMessage payload."),
             nameof(ChatMessage) => obj.ToObject<ChatMessage>() ?? throw new InvalidOperationException("Invalid ChatMessage payload."),
             nameof(CompanyStateSnapshotMessage) => obj.ToObject<CompanyStateSnapshotMessage>() ?? throw new InvalidOperationException("Invalid CompanyStateSnapshotMessage payload."),
             _ => throw new InvalidOperationException($"Unknown message type '{type}'.")

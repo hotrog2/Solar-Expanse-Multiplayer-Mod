@@ -105,6 +105,38 @@ public sealed class PublicCompanyEventMessage : NetMessage
     public Dictionary<string, string> Data { get; set; } = new Dictionary<string, string>();
 }
 
+public sealed class TradeOfferSyncMessage : NetMessage
+{
+    public Guid SyncId { get; set; }
+    public string Operation { get; set; } = string.Empty;
+    public int OfferId { get; set; }
+    public int OwnerCompanySlot { get; set; }
+    public string OwnerPlayerName { get; set; } = string.Empty;
+    public string OwnerCompanyName { get; set; } = string.Empty;
+    public int ObjectId { get; set; }
+    public string ObjectName { get; set; } = string.Empty;
+    public string ResourceId { get; set; } = string.Empty;
+    public bool BuySell { get; set; }
+    public double PricePerUnit { get; set; }
+    public double CountToBuySell { get; set; }
+    public double CountCompleted { get; set; }
+    public bool OfferDone { get; set; }
+    public long OfferStartUtcTicks { get; set; }
+    public long SentUtcTicks { get; set; }
+}
+
+public sealed class TradeOfferFulfillMessage : NetMessage
+{
+    public Guid RequestId { get; set; }
+    public int OfferId { get; set; }
+    public int OwnerCompanySlot { get; set; }
+    public int TakerCompanySlot { get; set; }
+    public string TakerPlayerName { get; set; } = string.Empty;
+    public string TakerCompanyName { get; set; } = string.Empty;
+    public double Count { get; set; }
+    public long SentUtcTicks { get; set; }
+}
+
 public sealed class ChatMessage : NetMessage
 {
     public Guid MessageId { get; set; }

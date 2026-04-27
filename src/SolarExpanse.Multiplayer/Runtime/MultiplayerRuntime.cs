@@ -8,6 +8,7 @@ using Manager;
 using SolarExpanse.Multiplayer.Configuration;
 using SolarExpanse.Multiplayer.Game.Company;
 using SolarExpanse.Multiplayer.Game.Time;
+using SolarExpanse.Multiplayer.Game.Trade;
 using SolarExpanse.Multiplayer.Networking.Client;
 using SolarExpanse.Multiplayer.Networking.Host;
 using SolarExpanse.Multiplayer.Networking.Protocol;
@@ -24,6 +25,7 @@ public sealed class MultiplayerRuntime : IDisposable
     private readonly TimeSyncService _timeSyncService;
     private readonly CompanyOwnershipService _companyOwnershipService;
     private readonly CompanyStateSyncService _companyStateSyncService;
+    private readonly TradeSyncService _tradeSyncService;
     private readonly ConcurrentQueue<float> _pendingTimeScaleRequests = new ConcurrentQueue<float>();
     private readonly object _startGameLock = new object();
     private readonly object _chatLock = new object();
@@ -86,6 +88,7 @@ public sealed class MultiplayerRuntime : IDisposable
         _timeSyncService = new TimeSyncService();
         _companyOwnershipService = new CompanyOwnershipService();
         _companyStateSyncService = new CompanyStateSyncService(_companyOwnershipService);
+        _tradeSyncService = new TradeSyncService(_companyOwnershipService, log);
 
         _addressInput = _config.HostAddress.Value;
         _portInput = _config.HostPort.Value.ToString();
@@ -103,6 +106,8 @@ public sealed class MultiplayerRuntime : IDisposable
         _host.CompanyActionCommandReceived += OnCompanyActionCommandReceived;
         _host.ChatMessageReceived += OnHostChatMessageReceived;
         _host.ResyncRequested += OnResyncRequested;
+        _host.TradeOfferSyncReceived += OnHostTradeOfferSyncReceived;
+        _host.TradeOfferFulfillReceived += OnHostTradeOfferFulfillReceived;
         _client.Joined += OnJoined;
         _client.TimeSnapshotReceived += snapshot => _timeSyncService.QueueSnapshot(snapshot);
         _client.CompanyStateReceived += snapshot =>
@@ -122,6 +127,8 @@ public sealed class MultiplayerRuntime : IDisposable
         _client.CompanyActionResultReceived += OnCompanyActionResultReceived;
         _client.ChatMessageReceived += AddChatMessage;
         _client.PublicCompanyEventReceived += AddPublicCompanyEvent;
+        _client.TradeOfferSyncReceived += OnTradeOfferSyncReceived;
+        _client.TradeOfferFulfillReceived += OnTradeOfferFulfillReceived;
         _client.PresenceUpdated += presence =>
         {
             _latestPresence = presence;
@@ -365,6 +372,77 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         return SendPrivateCompanyAction(actionType, arguments);
+    }
+
+    public void RecordMarketOfferChanged(global::Game.ObjectInfoDataScripts.Offer? offer, string operation)
+    {
+        if (TradeSyncService.SuppressLocalHooks || !IsTradeSyncActive())
+        {
+            return;
+        }
+
+        var message = _tradeSyncService.CreateOfferSync(
+            offer,
+            operation,
+            _playerNameInput,
+            _companyNameInput,
+            _companyOwnershipService.LocalCompanySlot);
+
+        if (message == null)
+        {
+            return;
+        }
+
+        NormalizeTradeOfferIdentity(message);
+        if (_host.IsRunning)
+        {
+            _host.Broadcast(message);
+            return;
+        }
+
+        if (_client.IsConnected)
+        {
+            _client.Send(message);
+        }
+    }
+
+    public void RecordMarketOfferFulfilled(global::Game.ObjectInfoDataScripts.Offer? offer, global::Game.Company? takerCompany, double count, bool accepted)
+    {
+        if (!accepted || TradeSyncService.SuppressLocalHooks || !IsTradeSyncActive())
+        {
+            return;
+        }
+
+        if (!_companyOwnershipService.TryGetSlotForCompany(takerCompany, out var takerSlot) ||
+            takerSlot != _companyOwnershipService.LocalCompanySlot)
+        {
+            return;
+        }
+
+        var message = _tradeSyncService.CreateFulfillMessage(
+            offer,
+            takerCompany,
+            count,
+            _playerNameInput,
+            _companyNameInput);
+
+        if (message == null)
+        {
+            return;
+        }
+
+        if (_host.IsRunning)
+        {
+            _host.Broadcast(message);
+            AddTradePublicEvent(message);
+            return;
+        }
+
+        if (_client.IsConnected)
+        {
+            AddTradePublicEvent(message);
+            _client.Send(message);
+        }
     }
 
     public bool UpdateHostLobbySettings(string companyName, string companySlot, string startingCorporation)
@@ -755,6 +833,39 @@ public sealed class MultiplayerRuntime : IDisposable
         _host.Broadcast(normalized);
     }
 
+    private void OnHostTradeOfferSyncReceived(HostPeerState peer, TradeOfferSyncMessage message)
+    {
+        message.OwnerCompanySlot = peer.AssignedCompanySlot;
+        message.OwnerPlayerName = peer.PlayerName;
+        message.OwnerCompanyName = peer.CompanyName;
+        message.SentUtcTicks = DateTime.UtcNow.Ticks;
+        NormalizeTradeOfferIdentity(message);
+        _tradeSyncService.ApplyOfferSync(message);
+        _host.BroadcastExcept(peer.SessionId, message);
+    }
+
+    private void OnTradeOfferSyncReceived(TradeOfferSyncMessage message)
+    {
+        _tradeSyncService.ApplyOfferSync(message);
+    }
+
+    private void OnHostTradeOfferFulfillReceived(HostPeerState peer, TradeOfferFulfillMessage message)
+    {
+        message.TakerCompanySlot = peer.AssignedCompanySlot;
+        message.TakerPlayerName = peer.PlayerName;
+        message.TakerCompanyName = peer.CompanyName;
+        message.SentUtcTicks = DateTime.UtcNow.Ticks;
+        _tradeSyncService.ApplyFulfillment(message);
+        AddTradePublicEvent(message);
+        _host.BroadcastExcept(peer.SessionId, message);
+    }
+
+    private void OnTradeOfferFulfillReceived(TradeOfferFulfillMessage message)
+    {
+        _tradeSyncService.ApplyFulfillment(message);
+        AddTradePublicEvent(message);
+    }
+
     private void SendChatMessage()
     {
         var text = (_chatInput ?? string.Empty).Trim();
@@ -989,6 +1100,37 @@ public sealed class MultiplayerRuntime : IDisposable
         }
     }
 
+    private void AddTradePublicEvent(TradeOfferFulfillMessage message)
+    {
+        if (!_companyOwnershipService.TryGetCompanyDisplayName(message.OwnerCompanySlot, out var ownerCompanyName))
+        {
+            ownerCompanyName = $"Company {message.OwnerCompanySlot}";
+        }
+
+        var takerCompanyName = string.IsNullOrWhiteSpace(message.TakerCompanyName)
+            ? $"Company {message.TakerCompanySlot}"
+            : message.TakerCompanyName;
+
+        AddPublicCompanyEvent(new PublicCompanyEventMessage
+        {
+            MessageType = nameof(PublicCompanyEventMessage),
+            EventId = message.RequestId,
+            CompanySlot = message.TakerCompanySlot,
+            PlayerName = message.TakerPlayerName,
+            CompanyName = takerCompanyName,
+            EventType = "TradeFulfilled",
+            Summary = $"{takerCompanyName} traded with {ownerCompanyName}.",
+            SentUtcTicks = DateTime.UtcNow.Ticks,
+            Data = new Dictionary<string, string>
+            {
+                ["OfferId"] = message.OfferId.ToString(CultureInfo.InvariantCulture),
+                ["OwnerCompanySlot"] = message.OwnerCompanySlot.ToString(CultureInfo.InvariantCulture),
+                ["TakerCompanySlot"] = message.TakerCompanySlot.ToString(CultureInfo.InvariantCulture),
+                ["Count"] = message.Count.ToString(CultureInfo.InvariantCulture)
+            }
+        });
+    }
+
     private PublicCompanyEventMessage[] GetPublicEventsSnapshot()
     {
         lock (_publicEventsLock)
@@ -1035,6 +1177,22 @@ public sealed class MultiplayerRuntime : IDisposable
             }
 
             _host.Send(peer, _companyStateSyncService.CreateOutgoingPublicSnapshot(snapshot, hostAuthoritative: true, fullSnapshot: forceFull));
+        }
+
+        SendKnownTradeOffersToPeer(peer);
+    }
+
+    private void SendKnownTradeOffersToPeer(HostPeerState peer)
+    {
+        foreach (var offerSync in _tradeSyncService.CreateFullOfferSync(_playerNameInput, _companyNameInput))
+        {
+            if (offerSync.OwnerCompanySlot == peer.AssignedCompanySlot)
+            {
+                continue;
+            }
+
+            NormalizeTradeOfferIdentity(offerSync);
+            _host.Send(peer, offerSync);
         }
     }
 
@@ -1109,6 +1267,43 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         _companyOwnershipService.ApplyDisplayNamesToGame();
+    }
+
+    private bool IsTradeSyncActive()
+    {
+        return _sharedSessionStarted || _host.IsRunning || _client.IsConnected;
+    }
+
+    private void NormalizeTradeOfferIdentity(TradeOfferSyncMessage message)
+    {
+        if (message.OwnerCompanySlot == _companyOwnershipService.LocalCompanySlot)
+        {
+            message.OwnerPlayerName = _playerNameInput;
+            message.OwnerCompanyName = _companyNameInput;
+            return;
+        }
+
+        var peer = _host.Peers.FirstOrDefault(x => x.AssignedCompanySlot == message.OwnerCompanySlot);
+        if (peer != null)
+        {
+            message.OwnerPlayerName = peer.PlayerName;
+            message.OwnerCompanyName = peer.CompanyName;
+            return;
+        }
+
+        var player = _latestPresence.Players.FirstOrDefault(x => x.AssignedCompanySlot == message.OwnerCompanySlot);
+        if (player != null)
+        {
+            message.OwnerPlayerName = player.PlayerName;
+            message.OwnerCompanyName = player.CompanyName;
+            return;
+        }
+
+        if (_latestPresence.HostAssignedCompanySlot == message.OwnerCompanySlot)
+        {
+            message.OwnerPlayerName = _latestPresence.HostPlayerName;
+            message.OwnerCompanyName = _latestPresence.HostCompanyName;
+        }
     }
 
     private bool ShouldDrawMultiplayerWindow()

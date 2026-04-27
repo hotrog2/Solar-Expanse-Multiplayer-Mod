@@ -26,6 +26,8 @@ public sealed class DirectConnectClient : IDisposable
     public event Action<CompanyActionResultMessage>? CompanyActionResultReceived;
     public event Action<ChatMessage>? ChatMessageReceived;
     public event Action<PublicCompanyEventMessage>? PublicCompanyEventReceived;
+    public event Action<TradeOfferSyncMessage>? TradeOfferSyncReceived;
+    public event Action<TradeOfferFulfillMessage>? TradeOfferFulfillReceived;
     public event Action<CompanyStateSnapshotMessage>? CompanyStateReceived;
     public event Action? Disconnected;
 
@@ -159,6 +161,12 @@ public sealed class DirectConnectClient : IDisposable
                         break;
                     case PublicCompanyEventMessage publicCompanyEvent:
                         PublicCompanyEventReceived?.Invoke(publicCompanyEvent);
+                        break;
+                    case TradeOfferSyncMessage tradeOfferSync:
+                        TradeOfferSyncReceived?.Invoke(tradeOfferSync);
+                        break;
+                    case TradeOfferFulfillMessage tradeOfferFulfill:
+                        TradeOfferFulfillReceived?.Invoke(tradeOfferFulfill);
                         break;
                     case CompanyStateSnapshotMessage companyState:
                         CompanyStateReceived?.Invoke(companyState);

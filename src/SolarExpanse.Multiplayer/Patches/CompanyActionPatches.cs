@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
+using SolarExpanse.Multiplayer.Game.Trade;
 
 namespace SolarExpanse.Multiplayer.Patches;
 
@@ -160,5 +161,53 @@ internal static class SpacecraftPublicEventPatches
         {
             SolarExpanseMultiplayerPlugin.Log?.LogWarning($"Failed to record spacecraft public event: {ex.Message}");
         }
+    }
+}
+
+[HarmonyPatch(typeof(global::Manager.MarketOfferManager))]
+internal static class MarketOfferManagerPatches
+{
+    [HarmonyPostfix]
+    [HarmonyPatch("AddOffer")]
+    private static void AddOfferPostfix(global::Game.ObjectInfoDataScripts.Offer offer, bool __result)
+    {
+        if (!__result || TradeSyncService.SuppressLocalHooks)
+        {
+            return;
+        }
+
+        SolarExpanseMultiplayerPlugin.Runtime?.RecordMarketOfferChanged(offer, "Upsert");
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch("CancelOffer")]
+    private static void CancelOfferPostfix(global::Game.ObjectInfoDataScripts.Offer offer, bool __result)
+    {
+        if (!__result || TradeSyncService.SuppressLocalHooks)
+        {
+            return;
+        }
+
+        SolarExpanseMultiplayerPlugin.Runtime?.RecordMarketOfferChanged(offer, "Cancel");
+    }
+}
+
+[HarmonyPatch(typeof(global::Game.ObjectInfoDataScripts.Offer))]
+internal static class MarketOfferFulfillmentPatches
+{
+    [HarmonyPostfix]
+    [HarmonyPatch("FullFill")]
+    private static void FullFillPostfix(
+        global::Game.ObjectInfoDataScripts.Offer __instance,
+        global::Game.Company CompanyTakeOffer,
+        double count,
+        bool __result)
+    {
+        if (TradeSyncService.SuppressLocalHooks)
+        {
+            return;
+        }
+
+        SolarExpanseMultiplayerPlugin.Runtime?.RecordMarketOfferFulfilled(__instance, CompanyTakeOffer, count, __result);
     }
 }
