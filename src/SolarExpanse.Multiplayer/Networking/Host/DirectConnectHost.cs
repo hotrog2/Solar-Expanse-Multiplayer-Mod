@@ -103,13 +103,25 @@ public sealed class DirectConnectHost : IDisposable
 
     public void BroadcastStartGame()
     {
+        BroadcastStartGame(CreateStartGameMessage());
+    }
+
+    public void BroadcastStartGame(StartGameMessage startGame)
+    {
         foreach (var peer in _peers.Values)
         {
             peer.IsGameReady = false;
             peer.LastReadyStartSessionId = Guid.Empty;
         }
 
-        Broadcast(CreateStartGameMessage());
+        if (startGame.SessionId == Guid.Empty)
+        {
+            startGame.SessionId = Guid.NewGuid();
+        }
+
+        _currentStartSessionId = startGame.SessionId;
+        startGame.MessageType = nameof(StartGameMessage);
+        Broadcast(startGame);
     }
 
     public void Start(int port, string hostPlayerName, string hostCompanyName, int hostCompanySlot, string hostStartingCorporation, int maxCompanySlots, Func<string, int, IReadOnlyCollection<int>, int> assignCompanySlot, Func<JoinAcceptedMessage> createJoinAccepted)

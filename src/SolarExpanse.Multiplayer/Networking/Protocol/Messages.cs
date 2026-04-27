@@ -52,6 +52,16 @@ public sealed class StartGameMessage : NetMessage
 {
     public Guid SessionId { get; set; }
     public int MaxCompanySlots { get; set; }
+    public string StartMode { get; set; } = "NewGame";
+    public string HostSaveName { get; set; } = string.Empty;
+    public long HostSaveGameDateTicks { get; set; }
+    public string PlanetarySystemId { get; set; } = string.Empty;
+    public string PlanetarySystemSceneName { get; set; } = string.Empty;
+    public string PlanetarySystemCustomJsonFileName { get; set; } = string.Empty;
+    public string StartGameEpochId { get; set; } = string.Empty;
+    public string GameDifficulty { get; set; } = string.Empty;
+    public bool SetupAIs { get; set; }
+    public List<string> EnabledRivalCorporationIds { get; set; } = new List<string>();
     public string HostPlayerName { get; set; } = string.Empty;
     public string HostCompanyName { get; set; } = string.Empty;
     public string HostStartingCorporation { get; set; } = string.Empty;

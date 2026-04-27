@@ -3,9 +3,14 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using SolarExpanse.Multiplayer.Networking.Host;
+using SolarExpanse.Multiplayer.Networking.Protocol;
 using SolarExpanse.Multiplayer.Runtime;
+using Manager;
+using ScriptableObjectScripts;
+using ScriptableObjectScripts.StartGameConfiguration;
 using TMPro;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 namespace SolarExpanse.Multiplayer.UI;
@@ -23,6 +28,9 @@ internal sealed class MainMenuMultiplayerPanel
     private TMP_InputField? _maxCompaniesInput;
     private TextMeshProUGUI? _statusText;
     private TextMeshProUGUI? _lobbyStatusText;
+    private SimpleDropdown? _hostGameSourceDropdown;
+    private SimpleDropdown? _hostSaveDropdown;
+    private TextMeshProUGUI? _hostSaveInfoText;
     private GameObject? _lobbyRowsRoot;
     private GameObject? _startGameButtonRoot;
     private readonly List<LobbyRowControls> _lobbyRows = new List<LobbyRowControls>();
@@ -76,12 +84,12 @@ internal sealed class MainMenuMultiplayerPanel
         panelRect.anchorMax = new Vector2(0.5f, 0.5f);
         panelRect.pivot = new Vector2(0.5f, 0.5f);
         panelRect.anchoredPosition = Vector2.zero;
-        panelRect.sizeDelta = new Vector2(640f, 520f);
+        panelRect.sizeDelta = new Vector2(700f, 640f);
 
         var panelImage = panel.AddComponent<Image>();
         panelImage.color = new Color(0.02f, 0.05f, 0.08f, 0.96f);
 
-        CreateText(panel.transform, "SOLAR EXPANSE MULTIPLAYER", new Vector2(0f, 218f), new Vector2(560f, 40f), 28, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        CreateText(panel.transform, "SOLAR EXPANSE MULTIPLAYER", new Vector2(0f, 276f), new Vector2(620f, 40f), 28, FontStyles.Bold, new Color(0f, 1f, 0.88f));
 
         _setupRoot = new GameObject("Setup");
         _setupRoot.transform.SetParent(panel.transform, worldPositionStays: false);
@@ -92,29 +100,32 @@ internal sealed class MainMenuMultiplayerPanel
         StretchToParent(_lobbyRoot);
         _lobbyRoot.SetActive(false);
 
-        _statusText = CreateText(_setupRoot.transform, string.Empty, new Vector2(0f, 176f), new Vector2(560f, 34f), 16, FontStyles.Normal, Color.white);
+        _statusText = CreateText(_setupRoot.transform, string.Empty, new Vector2(0f, 226f), new Vector2(620f, 34f), 16, FontStyles.Normal, Color.white);
 
-        _playerNameInput = CreateInput(_setupRoot.transform, "Player Name", "Player", new Vector2(-160f, 112f), new Vector2(260f, 42f));
-        _addressInput = CreateInput(_setupRoot.transform, "Server Address", "127.0.0.1", new Vector2(-160f, 28f), new Vector2(260f, 42f));
-        _portInput = CreateInput(_setupRoot.transform, "Port", "27777", new Vector2(170f, 28f), new Vector2(180f, 42f));
-        _maxCompaniesInput = CreateInput(_setupRoot.transform, "Allowed Companies", "4", new Vector2(0f, -40f), new Vector2(220f, 42f));
+        _playerNameInput = CreateInput(_setupRoot.transform, "Player Name", "Player", new Vector2(-160f, 158f), new Vector2(260f, 42f));
+        _addressInput = CreateInput(_setupRoot.transform, "Server Address", "127.0.0.1", new Vector2(-160f, 74f), new Vector2(260f, 42f));
+        _portInput = CreateInput(_setupRoot.transform, "Port", "27777", new Vector2(170f, 74f), new Vector2(180f, 42f));
+        _maxCompaniesInput = CreateInput(_setupRoot.transform, "Allowed Companies", "4", new Vector2(0f, 6f), new Vector2(220f, 42f));
 
-        CreateButton(_setupRoot.transform, "HOST SERVER", new Vector2(-160f, -130f), new Vector2(210f, 48f), Host);
-        CreateButton(_setupRoot.transform, "DIRECT CONNECT", new Vector2(160f, -130f), new Vector2(230f, 48f), Connect);
-        CreateButton(_setupRoot.transform, "DISCONNECT", new Vector2(-160f, -196f), new Vector2(210f, 42f), Disconnect);
-        CreateButton(_setupRoot.transform, "BACK", new Vector2(160f, -196f), new Vector2(230f, 42f), Hide);
+        CreateButton(_setupRoot.transform, "HOST SERVER", new Vector2(-160f, -96f), new Vector2(210f, 48f), Host);
+        CreateButton(_setupRoot.transform, "DIRECT CONNECT", new Vector2(160f, -96f), new Vector2(230f, 48f), Connect);
+        CreateButton(_setupRoot.transform, "DISCONNECT", new Vector2(-160f, -166f), new Vector2(210f, 42f), Disconnect);
+        CreateButton(_setupRoot.transform, "BACK", new Vector2(160f, -166f), new Vector2(230f, 42f), Hide);
 
-        CreateText(_lobbyRoot.transform, "HOST LOBBY", new Vector2(0f, 160f), new Vector2(560f, 34f), 24, FontStyles.Bold, new Color(0f, 1f, 0.88f));
-        _lobbyStatusText = CreateText(_lobbyRoot.transform, string.Empty, new Vector2(0f, 126f), new Vector2(560f, 28f), 16, FontStyles.Normal, Color.white);
-        CreateText(_lobbyRoot.transform, "PLAYER", new Vector2(-252f, 88f), new Vector2(92f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
-        CreateText(_lobbyRoot.transform, "COMPANY NAME", new Vector2(-112f, 88f), new Vector2(150f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
-        CreateText(_lobbyRoot.transform, "SLOT", new Vector2(70f, 88f), new Vector2(80f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
-        CreateText(_lobbyRoot.transform, "STARTING CORPORATION", new Vector2(218f, 88f), new Vector2(210f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        CreateText(_lobbyRoot.transform, "HOST LOBBY", new Vector2(0f, 238f), new Vector2(620f, 34f), 24, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        _lobbyStatusText = CreateText(_lobbyRoot.transform, string.Empty, new Vector2(0f, 204f), new Vector2(620f, 28f), 16, FontStyles.Normal, Color.white);
+        _hostGameSourceDropdown = new SimpleDropdown(_lobbyRoot.transform, "GAME SOURCE", new Vector2(-175f, 154f), new Vector2(220f, 38f), GetHostGameSourceOptions(), MultiplayerRuntime.NewGameSourceLabel, _ => SaveHostGameSelection());
+        _hostSaveDropdown = new SimpleDropdown(_lobbyRoot.transform, "SAVE GAME", new Vector2(150f, 154f), new Vector2(320f, 38f), new[] { "No saves found" }, "No saves found", _ => SaveHostGameSelection());
+        _hostSaveInfoText = CreateText(_lobbyRoot.transform, string.Empty, new Vector2(0f, 116f), new Vector2(620f, 24f), 14, FontStyles.Normal, Color.white);
+        CreateText(_lobbyRoot.transform, "PLAYER", new Vector2(-252f, 80f), new Vector2(92f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        CreateText(_lobbyRoot.transform, "COMPANY NAME", new Vector2(-112f, 80f), new Vector2(150f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        CreateText(_lobbyRoot.transform, "SLOT", new Vector2(70f, 80f), new Vector2(80f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
+        CreateText(_lobbyRoot.transform, "STARTING CORPORATION", new Vector2(218f, 80f), new Vector2(210f, 24f), 14, FontStyles.Bold, new Color(0f, 1f, 0.88f));
         _lobbyRowsRoot = new GameObject("Lobby Rows");
         _lobbyRowsRoot.transform.SetParent(_lobbyRoot.transform, worldPositionStays: false);
         StretchToParent(_lobbyRowsRoot);
-        _startGameButtonRoot = CreateButton(_lobbyRoot.transform, "START GAME", new Vector2(-160f, -164f), new Vector2(210f, 48f), StartHostedGame);
-        CreateButton(_lobbyRoot.transform, "DISCONNECT", new Vector2(160f, -164f), new Vector2(230f, 48f), StopHosting);
+        _startGameButtonRoot = CreateButton(_lobbyRoot.transform, "START GAME", new Vector2(-160f, -228f), new Vector2(210f, 48f), StartHostedGame);
+        CreateButton(_lobbyRoot.transform, "DISCONNECT", new Vector2(160f, -228f), new Vector2(230f, 48f), StopHosting);
 
         RefreshFromRuntime();
     }
@@ -143,6 +154,7 @@ internal sealed class MainMenuMultiplayerPanel
         }
 
         _startGameButtonRoot?.SetActive(runtime.IsHosting);
+        RefreshHostGameSelectionControls(runtime);
         RefreshLobbyRows(runtime);
     }
 
@@ -212,10 +224,23 @@ internal sealed class MainMenuMultiplayerPanel
         var runtime = SolarExpanseMultiplayerPlugin.Runtime;
         var hostRow = _lobbyRows.FirstOrDefault(row => row.SessionId == null);
         var corporation = hostRow?.CorporationDropdown.Selected ?? string.Empty;
+        SaveHostGameSelection();
         if (runtime?.UpdateHostLobbySettings(hostRow?.CompanyNameInput.text ?? string.Empty, hostRow?.SlotDropdown.Selected ?? string.Empty, corporation) == true)
         {
-            runtime.BroadcastStartGameFromMenu();
-            StartNewGameFromLobby(corporation);
+            if (!runtime.BroadcastStartGameFromMenu())
+            {
+                RefreshFromRuntime();
+                return;
+            }
+
+            if (runtime.IsHostSaveGameSelected)
+            {
+                LoadSaveFromLobby(runtime.HostSaveNameInput);
+            }
+            else
+            {
+                StartNewGameFromLobby(corporation);
+            }
         }
 
         RefreshFromRuntime();
@@ -230,6 +255,12 @@ internal sealed class MainMenuMultiplayerPanel
 
         var localPlayer = startGame.Players.FirstOrDefault(player => player.SessionId == runtime.ClientSessionId);
         var corporation = localPlayer?.StartingCorporation;
+        if (string.Equals(startGame.StartMode, MultiplayerRuntime.SaveGameStartMode, System.StringComparison.OrdinalIgnoreCase))
+        {
+            StartFromHostSaveBaseline(corporation ?? startGame.HostStartingCorporation, startGame);
+            return;
+        }
+
         StartNewGameFromLobby(corporation ?? startGame.HostStartingCorporation);
     }
 
@@ -258,6 +289,51 @@ internal sealed class MainMenuMultiplayerPanel
         }
 
         RefreshFromRuntime();
+    }
+
+    private void RefreshHostGameSelectionControls(MultiplayerRuntime runtime)
+    {
+        if (_hostGameSourceDropdown == null || _hostSaveDropdown == null)
+        {
+            return;
+        }
+
+        _hostGameSourceDropdown.SetOptions(GetHostGameSourceOptions(), runtime.HostGameSourceInput);
+        var saveNames = runtime.GetHostSaveGameNames().ToList();
+        var saveOptions = saveNames.Count > 0 ? saveNames : new List<string> { "No saves found" };
+        var selectedSave = saveOptions.Contains(runtime.HostSaveNameInput)
+            ? runtime.HostSaveNameInput
+            : saveOptions[0];
+        _hostSaveDropdown.SetOptions(saveOptions, selectedSave);
+
+        var canSelectSave = runtime.IsHosting &&
+                            runtime.IsHostSaveGameSelected &&
+                            saveNames.Count > 0;
+        _hostGameSourceDropdown.SetInteractable(runtime.IsHosting);
+        _hostSaveDropdown.SetInteractable(canSelectSave);
+        if (_hostSaveInfoText != null)
+        {
+            _hostSaveInfoText.text = runtime.IsHosting
+                ? runtime.GetHostSaveSelectionSummary()
+                : "Host chooses new game or save before starting.";
+        }
+    }
+
+    private void SaveHostGameSelection()
+    {
+        var runtime = SolarExpanseMultiplayerPlugin.Runtime;
+        if (runtime == null || _hostGameSourceDropdown == null)
+        {
+            return;
+        }
+
+        var saveName = _hostSaveDropdown?.Selected ?? string.Empty;
+        if (saveName == "No saves found")
+        {
+            saveName = string.Empty;
+        }
+
+        runtime.UpdateHostGameSource(_hostGameSourceDropdown.Selected, saveName);
     }
 
     private void RefreshLobbyRows(MultiplayerRuntime runtime)
@@ -451,6 +527,53 @@ internal sealed class MainMenuMultiplayerPanel
         CompleteNewGameFlowNow(corporation);
     }
 
+    private void LoadSaveFromLobby(string saveName)
+    {
+        Hide();
+        var manager = FindLoadSaveManager();
+        if (manager != null && manager.Load(saveName))
+        {
+            SolarExpanseMultiplayerPlugin.Log?.LogInfo($"Started multiplayer host from save '{saveName}'.");
+            return;
+        }
+
+        SolarExpanseMultiplayerPlugin.Log?.LogWarning($"Could not load multiplayer host save '{saveName}'.");
+    }
+
+    private void StartFromHostSaveBaseline(string corporation, StartGameMessage startGame)
+    {
+        Hide();
+        OpenNewGameFlow();
+
+        if (_menuComponent is MonoBehaviour behaviour)
+        {
+            behaviour.StartCoroutine(CompleteHostSaveBaselineStart(corporation, startGame));
+            return;
+        }
+
+        CompleteHostSaveBaselineStartNow(corporation, startGame);
+    }
+
+    private IEnumerator CompleteHostSaveBaselineStart(string corporation, StartGameMessage startGame)
+    {
+        yield return null;
+        yield return null;
+        CompleteHostSaveBaselineStartNow(corporation, startGame);
+    }
+
+    private void CompleteHostSaveBaselineStartNow(string corporation, StartGameMessage startGame)
+    {
+        ApplyStartingCorporationSelection(corporation);
+        if (TryStartFromHostSaveConfiguration(corporation, startGame))
+        {
+            SolarExpanseMultiplayerPlugin.Log?.LogInfo($"Started multiplayer client baseline for host save '{startGame.HostSaveName}'.");
+            return;
+        }
+
+        SolarExpanseMultiplayerPlugin.Log?.LogWarning("Could not apply host save metadata; falling back to the normal new-game flow.");
+        CompleteNewGameFlowNow(corporation);
+    }
+
     private IEnumerator CompleteNewGameFlow(string corporation)
     {
         yield return null;
@@ -469,6 +592,166 @@ internal sealed class MainMenuMultiplayerPanel
 
         SolarExpanseMultiplayerPlugin.Log?.LogWarning("Could not find the game customization flow; falling back to normal solar system start.");
         AccessTools.Method(_menuComponent.GetType(), "OnClickBtnNormalSolarSystem")?.Invoke(_menuComponent, null);
+    }
+
+    private static bool TryStartFromHostSaveConfiguration(string corporation, StartGameMessage startGame)
+    {
+        var customization = FindActiveGameCustomization();
+        if (customization == null)
+        {
+            return false;
+        }
+
+        var customizationType = customization.GetType();
+        var config = AccessTools.Field(customizationType, "startGameConfiguration")?.GetValue(customization) as GameManager.StartGameConfiguration;
+        if (config == null)
+        {
+            return false;
+        }
+
+        var selectedCompany = AccessTools.Method(customizationType, "GetUserCompany")?.Invoke(customization, null) as CompanyDefinition
+                              ?? FindCompanyDefinition(corporation);
+        var descriptor = FindPlanetarySystemDescriptor(customization, startGame.PlanetarySystemId, startGame.PlanetarySystemSceneName, startGame.PlanetarySystemCustomJsonFileName);
+        var epoch = FindStartGameEpoch(customization, descriptor, startGame.StartGameEpochId);
+        if (selectedCompany == null || descriptor == null || epoch == null)
+        {
+            return false;
+        }
+
+        config.Company = selectedCompany;
+        config.startWithTutorial = false;
+        config.setupAIs = startGame.SetupAIs;
+        config.enabledRivalCorporations = startGame.EnabledRivalCorporationIds
+            .Select(FindCompanyDefinition)
+            .Where(company => company != null && company != selectedCompany)
+            .Cast<CompanyDefinition>()
+            .Distinct()
+            .ToList();
+        config.GameDifficulty = System.Enum.TryParse(startGame.GameDifficulty, out GameManager.EGameDifficulty difficulty)
+            ? difficulty
+            : GameManager.EGameDifficulty.Pioneer;
+        config.PlanetarySystemDescriptor = descriptor;
+        config.StartGameEpoch = epoch;
+        config.SetGameplayIDIfNotSet();
+        GameManager.StaticStartGameConfig = config;
+        SceneManager.LoadScene("LoadingScreen");
+        return true;
+    }
+
+    private static object? FindActiveGameCustomization()
+    {
+        var customizationType = AccessTools.TypeByName("Game.UI.Menu.GameCustomizationUI.GameCustomizationUI");
+        if (customizationType == null)
+        {
+            return null;
+        }
+
+        foreach (var customization in Resources.FindObjectsOfTypeAll(customizationType))
+        {
+            if (customization is Component component && component.gameObject.scene.IsValid())
+            {
+                return customization;
+            }
+        }
+
+        return null;
+    }
+
+    private static PlanetarySystemDescriptor? FindPlanetarySystemDescriptor(object customization, string planetarySystemId, string sceneName, string customJsonFileName)
+    {
+        var starSystemSettings = AccessTools.Field(customization.GetType(), "starSystemSettingsUI")?.GetValue(customization);
+        var descriptors = new List<PlanetarySystemDescriptor>();
+        if (starSystemSettings != null)
+        {
+            var map = AccessTools.Field(starSystemSettings.GetType(), "planetarySystem")?.GetValue(starSystemSettings) as IDictionary;
+            if (map != null)
+            {
+                foreach (DictionaryEntry entry in map)
+                {
+                    if (entry.Value is PlanetarySystemDescriptor descriptor && !descriptors.Contains(descriptor))
+                    {
+                        descriptors.Add(descriptor);
+                    }
+                }
+            }
+        }
+
+        descriptors.AddRange(Resources.FindObjectsOfTypeAll<PlanetarySystemDescriptor>());
+        var selected = descriptors.FirstOrDefault(descriptor =>
+                !string.IsNullOrWhiteSpace(planetarySystemId) &&
+                string.Equals(descriptor.ID, planetarySystemId, System.StringComparison.OrdinalIgnoreCase)) ??
+            descriptors.FirstOrDefault(descriptor =>
+                !string.IsNullOrWhiteSpace(sceneName) &&
+                string.Equals(descriptor.SceneName, sceneName, System.StringComparison.OrdinalIgnoreCase));
+
+        if (selected != null && !string.IsNullOrWhiteSpace(customJsonFileName))
+        {
+            selected.ChangeCustomJsonFileName(customJsonFileName);
+        }
+
+        return selected;
+    }
+
+    private static StartGameEpoch? FindStartGameEpoch(object customization, PlanetarySystemDescriptor? descriptor, string startGameEpochId)
+    {
+        if (descriptor != null)
+        {
+            var match = descriptor.MapEpochToToStartData.Keys.FirstOrDefault(epoch =>
+                string.Equals(epoch.ID, startGameEpochId, System.StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+            {
+                return match;
+            }
+
+            if (descriptor.MapEpochToToStartData.Count == 1)
+            {
+                return descriptor.MapEpochToToStartData.Keys.First();
+            }
+        }
+
+        var startGameEpochSettings = AccessTools.Field(customization.GetType(), "startGameEpochSettingsUI")?.GetValue(customization);
+        var epochProperty = startGameEpochSettings == null
+            ? null
+            : AccessTools.Property(startGameEpochSettings.GetType(), "StartGameEpochs");
+        var epochs = epochProperty?.GetValue(startGameEpochSettings, null) as IEnumerable<StartGameEpoch>;
+        return epochs?.FirstOrDefault(epoch => string.Equals(epoch.ID, startGameEpochId, System.StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static CompanyDefinition? FindCompanyDefinition(string companyIdOrName)
+    {
+        if (string.IsNullOrWhiteSpace(companyIdOrName))
+        {
+            return null;
+        }
+
+        var manager = Resources.FindObjectsOfTypeAll<AllScriptableObjectManager>().FirstOrDefault();
+        var fromManager = manager?.AllCompanyDefinitions?.GetByID(companyIdOrName);
+        if (fromManager != null)
+        {
+            return fromManager;
+        }
+
+        foreach (var company in Resources.FindObjectsOfTypeAll<CompanyDefinition>())
+        {
+            if (string.Equals(company.ID, companyIdOrName, System.StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(GetCorporationDisplayName(company.ID), companyIdOrName, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return company;
+            }
+        }
+
+        return null;
+    }
+
+    private static LoadSaveManager? FindLoadSaveManager()
+    {
+        var manager = UnityEngine.Object.FindObjectOfType<LoadSaveManager>();
+        if (manager != null)
+        {
+            return manager;
+        }
+
+        return Resources.FindObjectsOfTypeAll<LoadSaveManager>().FirstOrDefault();
     }
 
     private static bool AdvanceThroughGameCustomization()
@@ -523,6 +806,11 @@ internal sealed class MainMenuMultiplayerPanel
         }
 
         return Enumerable.Range(0, max).Select(slot => slot.ToString()).ToArray();
+    }
+
+    private static IEnumerable<string> GetHostGameSourceOptions()
+    {
+        return new[] { MultiplayerRuntime.NewGameSourceLabel, MultiplayerRuntime.SaveGameSourceLabel };
     }
 
     private static IEnumerable<string> GetCorporationOptions()

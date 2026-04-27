@@ -18,6 +18,11 @@ namespace SolarExpanse.Multiplayer.Runtime;
 
 public sealed class MultiplayerRuntime : IDisposable
 {
+    public const string NewGameStartMode = "NewGame";
+    public const string SaveGameStartMode = "SaveGame";
+    public const string NewGameSourceLabel = "New Game";
+    public const string SaveGameSourceLabel = "Load Save";
+
     private readonly ManualLogSource _log;
     private readonly MultiplayerConfig _config;
     private readonly DirectConnectHost _host;
@@ -52,6 +57,8 @@ public sealed class MultiplayerRuntime : IDisposable
     private string _companySlotInput;
     private string _maxCompaniesInput;
     private string _startingCorporationInput = "Solex";
+    private string _hostGameSourceInput = NewGameSourceLabel;
+    private string _hostSaveNameInput = string.Empty;
     private string _chatInput = string.Empty;
     private Guid _clientSessionId = Guid.Empty;
     private string _hostPlayerName = string.Empty;
@@ -64,6 +71,9 @@ public sealed class MultiplayerRuntime : IDisposable
     public string CompanySlotInput => _companySlotInput;
     public string MaxCompaniesInput => _maxCompaniesInput;
     public string StartingCorporationInput => _startingCorporationInput;
+    public string HostGameSourceInput => _hostGameSourceInput;
+    public string HostSaveNameInput => _hostSaveNameInput;
+    public bool IsHostSaveGameSelected => string.Equals(_hostGameSourceInput, SaveGameSourceLabel, StringComparison.OrdinalIgnoreCase);
     public bool IsHosting => _host.IsRunning;
     public bool IsClientConnected => _client.IsConnected;
     public Guid ClientSessionId => _clientSessionId;
@@ -293,12 +303,89 @@ public sealed class MultiplayerRuntime : IDisposable
         }
 
         RefreshCompanyDisplayNames();
-        _host.BroadcastStartGame();
+        var startGame = _host.CreateStartGameMessage();
+        if (!ConfigureStartGameMessage(startGame))
+        {
+            return false;
+        }
+
+        _host.BroadcastStartGame(startGame);
         _activeStartSessionId = _host.CurrentStartSessionId;
         _sharedSessionStarted = true;
         _gameReadySent = false;
-        _status = "Starting shared session.";
+        _status = startGame.StartMode == SaveGameStartMode
+            ? $"Starting shared session from save '{startGame.HostSaveName}'."
+            : "Starting shared session from a new game.";
         return true;
+    }
+
+    public IReadOnlyList<string> GetHostSaveGameNames()
+    {
+        try
+        {
+            return GetSaveInfos()
+                .Keys
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning($"Could not enumerate save games: {ex.Message}");
+            return Array.Empty<string>();
+        }
+    }
+
+    public bool UpdateHostGameSource(string gameSource, string saveName)
+    {
+        _hostGameSourceInput = string.Equals(gameSource, SaveGameSourceLabel, StringComparison.OrdinalIgnoreCase)
+            ? SaveGameSourceLabel
+            : NewGameSourceLabel;
+
+        if (!IsHostSaveGameSelected)
+        {
+            _status = _host.IsRunning ? $"Hosting on port {_host.BoundPort}." : _status;
+            return true;
+        }
+
+        var saveNames = GetHostSaveGameNames();
+        if (saveNames.Count == 0)
+        {
+            _hostSaveNameInput = string.Empty;
+            _status = "No save games found.";
+            return false;
+        }
+
+        _hostSaveNameInput = saveNames.Contains(saveName)
+            ? saveName
+            : saveNames[0];
+        _status = $"Selected host save '{_hostSaveNameInput}'.";
+        return true;
+    }
+
+    public string GetHostSaveSelectionSummary()
+    {
+        if (!IsHostSaveGameSelected)
+        {
+            return "Host will start a new multiplayer game.";
+        }
+
+        if (string.IsNullOrWhiteSpace(_hostSaveNameInput))
+        {
+            return "Select a save before starting.";
+        }
+
+        if (!TryGetSaveInfo(_hostSaveNameInput, out var saveInfo) || saveInfo == null)
+        {
+            return $"Save '{_hostSaveNameInput}' was not found.";
+        }
+
+        var systemName = saveInfo.startGameConfiguration?.PlanetarySystemDescriptor?.Name ??
+                         saveInfo.startGameConfiguration?.PlanetarySystemDescriptor?.ID ??
+                         "Unknown system";
+        var date = saveInfo.gameDate == default
+            ? "unknown date"
+            : saveInfo.gameDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        return $"Host will load '{_hostSaveNameInput}' ({systemName}, {date}).";
     }
 
     public bool TryConsumePendingStartGame(out StartGameMessage? message)
@@ -1241,6 +1328,93 @@ public sealed class MultiplayerRuntime : IDisposable
         RefreshCompanyDisplayNames();
         _companyStateSyncService.HandleIncomingSnapshot(publicSnapshot);
         _host.Broadcast(publicSnapshot);
+    }
+
+    private bool ConfigureStartGameMessage(StartGameMessage startGame)
+    {
+        if (!IsHostSaveGameSelected)
+        {
+            startGame.StartMode = NewGameStartMode;
+            startGame.HostSaveName = string.Empty;
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(_hostSaveNameInput))
+        {
+            var saveNames = GetHostSaveGameNames();
+            if (saveNames.Count > 0)
+            {
+                _hostSaveNameInput = saveNames[0];
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(_hostSaveNameInput) ||
+            !TryGetSaveInfo(_hostSaveNameInput, out var saveInfo) ||
+            saveInfo == null)
+        {
+            _status = "Select a valid save game before starting.";
+            return false;
+        }
+
+        var config = saveInfo.startGameConfiguration;
+        if (saveInfo.saveVersionCode < LoadSaveManager.SaveVersionCode)
+        {
+            _status = $"Save '{_hostSaveNameInput}' is from an unsupported older save format.";
+            return false;
+        }
+
+        startGame.StartMode = SaveGameStartMode;
+        startGame.HostSaveName = _hostSaveNameInput;
+        startGame.HostSaveGameDateTicks = saveInfo.gameDate.Ticks;
+        startGame.PlanetarySystemId = config?.PlanetarySystemDescriptor?.ID ?? string.Empty;
+        startGame.PlanetarySystemSceneName = config?.PlanetarySystemDescriptor?.SceneName ?? string.Empty;
+        startGame.PlanetarySystemCustomJsonFileName = config?.PlanetarySystemDescriptor?.CustomJSONFileName ?? string.Empty;
+        startGame.StartGameEpochId = config?.StartGameEpoch?.ID ?? string.Empty;
+        startGame.GameDifficulty = config?.GameDifficulty.ToString() ?? string.Empty;
+        startGame.SetupAIs = config?.setupAIs ?? false;
+        startGame.EnabledRivalCorporationIds = config?.enabledRivalCorporations?
+            .Where(company => company != null && !string.IsNullOrWhiteSpace(company.ID))
+            .Select(company => company.ID)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? new List<string>();
+        return true;
+    }
+
+    private bool TryGetSaveInfo(string saveName, out SaveInfo? saveInfo)
+    {
+        saveInfo = null;
+        if (string.IsNullOrWhiteSpace(saveName))
+        {
+            return false;
+        }
+
+        try
+        {
+            var infos = GetSaveInfos();
+            return infos.TryGetValue(saveName, out saveInfo);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning($"Could not read save info for '{saveName}': {ex.Message}");
+            return false;
+        }
+    }
+
+    private static Dictionary<string, SaveInfo> GetSaveInfos()
+    {
+        var manager = FindLoadSaveManager();
+        return manager?.GetAllSaveFilesInfos() ?? new Dictionary<string, SaveInfo>();
+    }
+
+    private static LoadSaveManager? FindLoadSaveManager()
+    {
+        var manager = UnityEngine.Object.FindObjectOfType<LoadSaveManager>();
+        if (manager != null)
+        {
+            return manager;
+        }
+
+        return Resources.FindObjectsOfTypeAll<LoadSaveManager>().FirstOrDefault();
     }
 
     private void RefreshCompanyDisplayNames()
